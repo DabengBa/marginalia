@@ -16,6 +16,7 @@ import { useNavigate } from "react-router-dom";
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EntryLocator } from "@/components/MarkdownView";
+import { useAuthObjectUrl } from "@/components/library/viewers/ViewerShared";
 import type { ChatImage } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
@@ -53,8 +54,14 @@ export interface Turn {
   conversationId?: string;
   /** Images attached to this user turn. Present only on live turns that
    *  were sent with attachments; historical/replayed turns omit them since
-   *  image bytes are never persisted or replayed. */
+   *  their bytes ride on the SSE request, not the transcript. */
   images?: ChatImage[];
+  /** Fully-qualified attachment URLs for a replayed turn, one per stored
+   *  image (see ReplayedTurn.attachments). Present only on transcript
+   *  turns; live turns carry raw base64 in `images` instead. Loaded through
+   *  the authenticated-blob mechanism so a token-protected backend still
+   *  serves them. UI-only re-display — never re-sent to the LLM. */
+  attachmentUrls?: string[];
   steps: Step[];
   answer: string | null;
   metrics?: TurnMetrics;
@@ -106,15 +113,19 @@ export function TurnView({ turn }: { turn: Turn }) {
         <div className="whitespace-pre-wrap text-sm">{turn.query}</div>
       </div>
 
-      {turn.images && turn.images.length > 0 && (
+      {((turn.images && turn.images.length > 0)
+        || (turn.attachmentUrls && turn.attachmentUrls.length > 0)) && (
         <div className="ml-8 mb-2 flex flex-wrap gap-2">
-          {turn.images.map((img, i) => (
+          {turn.images?.map((img, i) => (
             <img
-              key={i}
+              key={`live-${i}`}
               src={`data:${img.media_type};base64,${img.data_b64}`}
               alt={t.chat.imageAlt(i + 1)}
               className="h-16 w-16 rounded-md border border-border object-cover"
             />
+          ))}
+          {turn.attachmentUrls?.map((url, i) => (
+            <ReplayedAttachment key={`replay-${i}`} url={url} index={i} />
           ))}
         </div>
       )}
@@ -170,6 +181,35 @@ export function TurnView({ turn }: { turn: Turn }) {
           <Loader2 size={13} className="animate-spin" /> {t.chat.waiting}
         </div>
       )}
+    </div>
+  );
+}
+
+/** A single replayed image thumbnail. Loads the stored attachment through
+ *  the shared authenticated-blob hook so a token-protected backend still
+ *  serves it (object URL revoked on unmount by the hook). Keeps a fixed-size
+ *  box so the loading/error states don't shift layout, matching the live
+ *  pasted-image thumbnails. */
+function ReplayedAttachment({ url, index }: { url: string; index: number }) {
+  const { t } = useI18n();
+  const { src, err } = useAuthObjectUrl(url);
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt={t.chat.imageAlt(index + 1)}
+        className="h-16 w-16 rounded-md border border-border object-cover"
+      />
+    );
+  }
+  return (
+    <div
+      className="flex h-16 w-16 items-center justify-center rounded-md border border-border bg-bg-muted text-fg-subtle"
+      title={err ?? undefined}
+    >
+      {err
+        ? <AlertCircle size={14} />
+        : <Loader2 size={14} className="animate-spin" />}
     </div>
   );
 }

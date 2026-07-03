@@ -174,6 +174,14 @@ export interface ReplayedTurn {
   error: string | null;
   plan_text: string | null;
   tool_calls: ReplayedToolCall[];
+  /** Pasted chat images stored for this turn, re-served for UI display
+   *  only. Empty (or absent on legacy transcripts) when the turn had no
+   *  stored images. These are NEVER re-sent to the LLM — the runtime keeps
+   *  only the "[image attached]" text placeholder in conversation history;
+   *  saving to disk + serving is decoupled from the LLM message tape. Each
+   *  entry loads from
+   *  GET /v1/conversations/{conversation_id}/attachments/{name}. */
+  attachments?: Array<{ name: string; media_type: string }>;
   metrics: {
     tokens_in: number;
     tokens_out: number;

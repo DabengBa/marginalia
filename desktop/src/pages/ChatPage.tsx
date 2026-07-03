@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { AlertCircle, Gauge, Send, Square, Sparkles, X, Zap } from "lucide-react";
 
-import { sessions, settings as settingsApi } from "@/api/client";
+import { getBaseUrl, sessions, settings as settingsApi } from "@/api/client";
 import { streamChat } from "@/api/chatStream";
 import type {
   ChatEvent, ChatImage, ChatMode, LlmSettings, PlanBudgetData, ReplayedTurn, ReplayedToolCall,
@@ -786,9 +786,15 @@ function replayedToTurn(rt: ReplayedTurn, t: I18nStrings): Turn {
   for (const tc of rt.tool_calls) {
     steps.push(replayedToolCallStep(tc, t));
   }
+  // Re-display stored pasted images for this turn. UI-only: the URLs point
+  // at the serve endpoint; the image bytes are never in the LLM history.
+  const attachmentUrls = (rt.attachments ?? []).map(
+    (a) => `${getBaseUrl()}/v1/conversations/${rt.conversation_id}/attachments/${a.name}`,
+  );
   return {
     query: rt.user_message,
     conversationId: rt.conversation_id,
+    attachmentUrls: attachmentUrls.length > 0 ? attachmentUrls : undefined,
     steps,
     answer: rt.error ? null : rt.agent_response,
     metrics: rt.metrics,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,10 @@ from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import folders as folders_repo
 from marginalia.repositories import sessions as session_service
 from marginalia.repositories import tags as tags_repo
+from marginalia.services.attachments import (
+    list_turn_attachments,
+    read_attachment,
+)
 
 router = APIRouter(tags=["sessions"])
 
@@ -163,6 +167,25 @@ async def list_sessions(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.get("/conversations/{conversation_id}/attachments/{name}")
+async def get_conversation_attachment(
+    conversation_id: str,
+    name: str,
+) -> Response:
+    """Serve one stored chat image for UI re-display.
+
+    Returns the raw bytes with the correct Content-Type. 404 when the name
+    fails strict validation (``^\\d+\\.(png|jpe?g|gif|webp)$``), attempts
+    path traversal, or the file is absent. These files are UI-only — they
+    are never fed back to the LLM (see services.attachments docstring).
+    """
+    result = read_attachment(conversation_id, name)
+    if result is None:
+        raise HTTPException(status_code=404, detail="attachment not found")
+    data, media_type = result
+    return Response(content=data, media_type=media_type)
 
 
 @router.get("/sessions/{session_id}/messages")
@@ -304,6 +327,14 @@ async def session_messages(
                 "preview": preview,
             })
 
+        # UI re-display of pasted images. Gate the directory scan cheaply on
+        # the persisted placeholder marker (see runtime._persisted_user_message,
+        # which writes "[image attached]" or "[N images attached]" — both end
+        # in "attached]") so text-only turns cost nothing.
+        attachments: list[dict[str, Any]] = []
+        if "attached]" in (c.user_message or ""):
+            attachments = list_turn_attachments(c.id)
+
         turns.append({
             "conversation_id": c.id,
             "turn_index": c.turn_index,
@@ -311,6 +342,7 @@ async def session_messages(
             "started_at": c.started_at.isoformat() if c.started_at else None,
             "ended_at": c.ended_at.isoformat() if c.ended_at else None,
             "user_message": c.user_message,
+            "attachments": attachments,
             "agent_response": (
                 await _rewrite_footnotes_for_display(
                     c.agent_response,

@@ -96,6 +96,7 @@ from marginalia.repositories import tags as tags_repo
 from marginalia.repositories import folders as folders_repo
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories.task_outcomes import record_outcome
+from marginalia.services.attachments import save_turn_attachments
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_REFLECT_TURN
 from marginalia.agent import tool_display
@@ -622,6 +623,21 @@ async def run_turn(
         )
         await db.commit()
         conversation_id = conv.id
+
+    # Persist the ORIGINAL pasted images to disk for UI-only re-display when
+    # the user revisits this session. This is fully decoupled from the LLM
+    # message tape (history replay still reads only the '[image attached]'
+    # placeholder above and re-sends zero image bytes). Save the ORIGINAL
+    # `images`, NOT the possibly-dropped `turn_images` from the vision
+    # fallback path. Best-effort: a save failure must never fail the turn.
+    if images:
+        try:
+            save_turn_attachments(conversation_id, images)
+        except Exception:
+            log.exception(
+                "failed to persist chat attachments for conversation %s",
+                conversation_id,
+            )
 
     yield AgentEvent(event_type="conversation", data=conversation_id)
 
