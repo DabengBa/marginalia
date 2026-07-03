@@ -69,10 +69,22 @@ export interface Turn {
   done: boolean;
 }
 
+// The persisted user_message carries a "[image attached]" / "[N images
+// attached]" placeholder so the LLM history knows an image was present, but
+// once the thumbnails re-display we strip that marker from the shown text.
+const _IMAGE_MARKER_RE = /\s*\[(?:image|\d+\s+images?)\s+attached\]\s*$/i;
+
 export function TurnView({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const navigate = useNavigate();
   const { t } = useI18n();
+
+  // Hide the "[image attached]" placeholder on replayed image turns (the
+  // thumbnail below now shows the image); keep raw text on live/text turns.
+  const displayQuery = turn.attachmentUrls?.length
+    ? turn.query.replace(_IMAGE_MARKER_RE, "")
+    : turn.query;
 
   const inFlight = !turn.done && !turn.error;
   const showSteps = turn.steps.length > 0;
@@ -110,23 +122,45 @@ export function TurnView({ turn }: { turn: Turn }) {
         <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bg-muted text-fg-muted">
           <UserIcon size={13} />
         </div>
-        <div className="whitespace-pre-wrap text-sm">{turn.query}</div>
+        {displayQuery.length > 0 && (
+          <div className="whitespace-pre-wrap text-sm">{displayQuery}</div>
+        )}
       </div>
 
       {((turn.images && turn.images.length > 0)
         || (turn.attachmentUrls && turn.attachmentUrls.length > 0)) && (
         <div className="ml-8 mb-2 flex flex-wrap gap-2">
-          {turn.images?.map((img, i) => (
-            <img
-              key={`live-${i}`}
-              src={`data:${img.media_type};base64,${img.data_b64}`}
-              alt={t.chat.imageAlt(i + 1)}
-              className="h-16 w-16 rounded-md border border-border object-cover"
+          {turn.images?.map((img, i) => {
+            const src = `data:${img.media_type};base64,${img.data_b64}`;
+            return (
+              <img
+                key={`live-${i}`}
+                src={src}
+                alt={t.chat.imageAlt(i + 1)}
+                onClick={() => setLightbox(src)}
+                className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
+              />
+            );
+          })}
+          {turn.attachmentUrls?.map((url, i) => (
+            <ReplayedAttachment
+              key={`replay-${i}`} url={url} index={i} onOpen={setLightbox}
             />
           ))}
-          {turn.attachmentUrls?.map((url, i) => (
-            <ReplayedAttachment key={`replay-${i}`} url={url} index={i} />
-          ))}
+        </div>
+      )}
+
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 cursor-zoom-out animate-fade-in"
+        >
+          <img
+            src={lightbox}
+            alt={t.chat.imageAlt(1)}
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+          />
         </div>
       )}
 
@@ -190,7 +224,10 @@ export function TurnView({ turn }: { turn: Turn }) {
  *  serves it (object URL revoked on unmount by the hook). Keeps a fixed-size
  *  box so the loading/error states don't shift layout, matching the live
  *  pasted-image thumbnails. */
-function ReplayedAttachment({ url, index }: { url: string; index: number }) {
+function ReplayedAttachment(
+  { url, index, onOpen }:
+  { url: string; index: number; onOpen: (src: string) => void },
+) {
   const { t } = useI18n();
   const { src, err } = useAuthObjectUrl(url);
   if (src) {
@@ -198,7 +235,8 @@ function ReplayedAttachment({ url, index }: { url: string; index: number }) {
       <img
         src={src}
         alt={t.chat.imageAlt(index + 1)}
-        className="h-16 w-16 rounded-md border border-border object-cover"
+        onClick={() => onOpen(src)}
+        className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
       />
     );
   }
