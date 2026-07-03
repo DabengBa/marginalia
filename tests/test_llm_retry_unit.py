@@ -102,6 +102,21 @@ async def test_rate_limit_twice_then_success_is_retried() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_false_does_a_single_attempt() -> None:
+    """The settings connection probe passes retry=False so a rate-limited
+    endpoint fails fast instead of retry-storming a 429 into a timeout."""
+    import openai
+
+    inner = _ScriptedInner([_rate_limit(), _rate_limit()], result=_ok_response())
+    wrapped = _UsageRecordingChatClient(inner)
+
+    with pytest.raises(openai.RateLimitError):
+        await wrapped.complete(_REQUEST, retry=False)
+
+    assert inner.calls == 1  # no retry — the first 429 surfaces immediately
+
+
+@pytest.mark.asyncio
 async def test_bad_request_is_not_retried() -> None:
     import openai
 

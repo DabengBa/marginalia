@@ -127,7 +127,7 @@ class _UsageRecordingChatClient:
         self._tps = profile.tps if profile is not None else 10
         self._disable_thinking_by_default = disable_thinking_by_default
 
-    async def complete(self, request: ChatRequest) -> ChatResponse:
+    async def complete(self, request: ChatRequest, *, retry: bool = True) -> ChatResponse:
         if self._disable_thinking_by_default:
             request = with_disabled_thinking(request)
         # Import here to avoid a circular dep at module import time
@@ -142,8 +142,12 @@ class _UsageRecordingChatClient:
         # accumulated tool work). Each attempt re-paces via acquire_model_call_slot
         # and honors a server-supplied Retry-After. Non-transient errors
         # (BadRequestError / other 4xx / ValueError) propagate immediately.
+        # retry=False does a single attempt — used by the settings connection
+        # probe, which wants a fast yes/no and must NOT retry-storm a 429 into a
+        # timeout (a rate-limit there actually proves the endpoint is reachable).
+        max_attempts = _MAX_RETRY_ATTEMPTS if retry else 0
         last_exc: BaseException | None = None
-        for attempt in range(_MAX_RETRY_ATTEMPTS + 1):
+        for attempt in range(max_attempts + 1):
             await acquire_model_call_slot(
                 kind="chat",
                 provider=self.provider,
@@ -154,7 +158,7 @@ class _UsageRecordingChatClient:
             try:
                 resp = await self._inner.complete(request)
             except Exception as exc:
-                if attempt >= _MAX_RETRY_ATTEMPTS or not _is_transient_error(exc):
+                if attempt >= max_attempts or not _is_transient_error(exc):
                     raise
                 last_exc = exc
                 delay = _retry_delay(exc, attempt)

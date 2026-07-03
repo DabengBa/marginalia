@@ -218,20 +218,35 @@ async def _probe_llm_profile(profile: str) -> dict[str, Any]:
     """One ~1-token chat call to confirm a profile's key/base_url/model
     actually work. Returns {ok: True, model, provider} on success or
     {ok: False, error} with the (sanitized) provider message on failure."""
+    import anthropic
+    import openai
+
     api_key = resolve_profile(get_settings(), profile).api_key
     try:
         client = get_chat_client(profile)
-        # Bound the probe: a mistyped base_url that accepts the TCP connection
-        # but never responds must fail fast, not hang the endpoint.
+        # retry=False so a rate-limited probe fails fast instead of the retry
+        # wrapper waiting out a 429/Retry-After past the timeout below. Bound
+        # the whole thing so a base_url that accepts TCP but never responds
+        # can't hang the endpoint.
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
             await client.complete(
                 ChatRequest(
                     system=None,
                     messages=[ChatMessage(role="user", content="ping")],
                     max_tokens=1,
-                )
+                ),
+                retry=False,
             )
         return {"ok": True, "model": client.model, "provider": client.provider}
+    except (openai.RateLimitError, anthropic.RateLimitError):
+        # A 429 means the endpoint is reachable and the key is valid — the
+        # config works, the account is just being throttled (common when the
+        # test probes several same-account profiles back to back).
+        log.info("llm test rate-limited for profile %s (treated as reachable)", profile)
+        return {
+            "ok": True, "model": client.model, "provider": client.provider,
+            "note": "rate limited (reachable)",
+        }
     except TimeoutError:
         log.warning("llm test timed out for profile %s", profile)
         return {"ok": False, "error": f"timed out after {_PROBE_TIMEOUT_SECONDS:g}s"}
