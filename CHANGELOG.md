@@ -13,7 +13,9 @@
   chat model once per model and, for a text-only model, routes images through
   the `vision` profile as an injected description — automating the manual
   "describe the image first" workaround. Per-turn caps via
-  `MARGINALIA_CHAT_IMAGE_MAX_COUNT` / `MARGINALIA_CHAT_IMAGE_MAX_BYTES`.
+  `MARGINALIA_CHAT_IMAGE_MAX_COUNT` / `MARGINALIA_CHAT_IMAGE_MAX_BYTES`. Pasted
+  images are persisted per turn and re-displayed as thumbnails when a session's
+  transcript is reloaded (UI only — still never re-sent to the model).
 - `POST /v1/settings/llm/test` probes each configured LLM profile with a tiny
   chat call (bounded by a timeout) so a mistyped key/base-URL/model is caught
   at config time; a "Test connection" button surfaces per-profile status. A
@@ -42,6 +44,14 @@
 - Selective WebDAV publish no longer leaks the full folder/tag taxonomy or any
   sessions/conversations/journals — only the taxonomy and relations reachable
   from the selected entries ride along.
+- Agent per-call token budgets are sized for reasoning models (plan 2048,
+  execute 4096, vision-describe 4096), which spend most of their output budget
+  on hidden reasoning before any visible text — the old smaller caps were
+  consumed by reasoning and truncated the plan/answer/image description to
+  empty ("can't read the image" even when the model and image were fine).
+- The LLM test-connection probe treats a rate-limit (429) as reachable and no
+  longer retry-storms it into a false timeout when several profiles share one
+  provider account.
 
 ## 0.3.2 - 2026-07-03
 
