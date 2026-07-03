@@ -227,6 +227,16 @@ class Settings(BaseSettings):
     document_vision_min_image_dimension: int = Field(default=32, ge=0, le=100_000)
     document_vision_min_image_area: int = Field(default=4_096, ge=0, le=100_000_000)
 
+    # --- Scanned-PDF OCR ---------------------------------------------------
+    # Per-document page cap for the VLM OCR fallback. Scanned PDFs issue one
+    # vision LLM call per page, so an uncapped multi-thousand-page document
+    # would fan out an unbounded number of calls in a single ingest task.
+    # When the cap trips, ingest records an "ocr_page_cap" partial-coverage
+    # reason (mirroring the text-layer PDF_TEXT_MAX_INDEX_PAGES cap) and the
+    # agent can still OCR deeper pages on demand via read_segment. 0/negative
+    # means "no cap" (OCR every page).
+    ocr_max_pages: int = Field(default=300, validation_alias="OCR_MAX_PAGES")
+
     @property
     def database_url(self) -> str:
         if self.db_backend == "sqlite":

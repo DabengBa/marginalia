@@ -509,16 +509,36 @@ export const health = () =>
 
 // ---- settings -------------------------------------------------------------
 
+/** Per-profile result from POST /v1/settings/llm/test. `ok` is `null` for an
+ *  optional profile (vision) that isn't configured. */
+export interface LlmTestResult {
+  ok: boolean | null;
+  model?: string;
+  provider?: string;
+  error?: string;
+  configured?: boolean;
+}
+
 export const settings = {
   server: () => _request<ServerSettings>(`/v1/settings/server`),
   llm: () => _request<LlmSettings>(`/v1/settings/llm`),
   /** Patch the LLM overlay. Pass `null` for a field to clear that
-   *  override and fall back to the .env / default. */
+   *  override and fall back to the .env / default. When this PUT makes the
+   *  required profiles valid for the first time, the server auto-retries
+   *  ingests that failed before the key existed and reports the count via
+   *  `reprocessed_failed`. */
   updateLlm: (patch: Record<string, string | number | boolean | null>) =>
-    _request<LlmSettings>(`/v1/settings/llm`, {
+    _request<LlmSettings & { reprocessed_failed?: number }>(`/v1/settings/llm`, {
       method: "PUT",
       body: JSON.stringify({ patch, replace: false }),
     }),
+  /** Probe every resolved LLM profile with a 1-token chat call so a mistyped
+   *  key / base-URL / model is caught at config time. */
+  testLlm: () =>
+    _request<{ profiles: Record<string, LlmTestResult> }>(
+      `/v1/settings/llm/test`,
+      { method: "POST" },
+    ),
   rebuildSemanticIndex: (concurrency = 1) =>
     _request<SemanticIndexRebuildResult>(`/v1/semantic-index/rebuild`, {
       method: "POST",

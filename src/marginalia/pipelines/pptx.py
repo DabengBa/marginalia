@@ -65,7 +65,10 @@ class PptxPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body_bytes = await self._read_bytes(storage, ctx.storage_key)
-        slides, coverage = self._render_from_bytes_with_coverage(
+        # python-pptx deck parsing is pure-CPU; offload it so the event loop
+        # and worker heartbeats stay responsive on large presentations.
+        slides, coverage = await asyncio.to_thread(
+            self._render_from_bytes_with_coverage,
             body_bytes,
             max_slides=MAX_PPTX_SLIDES,
         )

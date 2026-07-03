@@ -13,6 +13,7 @@ XLS (legacy binary) is not supported; users should resave to .xlsx.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
@@ -155,7 +156,11 @@ class SpreadsheetPipeline(Pipeline):
         buf = bytearray()
         async for chunk in storage.get(key):
             buf.extend(chunk)
-        text, coverage = cls._render_from_bytes_with_coverage(bytes(buf))
+        # openpyxl workbook parsing is pure-CPU; offload it so the event loop
+        # and worker heartbeats stay responsive on large spreadsheets.
+        text, coverage = await asyncio.to_thread(
+            cls._render_from_bytes_with_coverage, bytes(buf),
+        )
         coverage["total_bytes"] = len(buf)
         coverage["indexed_bytes"] = len(buf)
         return text, coverage

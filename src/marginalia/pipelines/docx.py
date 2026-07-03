@@ -67,7 +67,11 @@ class DocxPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body_bytes = await self._read_bytes(storage, ctx.storage_key)
-        paragraphs = self._parse_paragraphs_from_bytes(body_bytes)
+        # python-docx parsing is pure-CPU; offload it so the event loop and
+        # worker heartbeats stay responsive on large documents.
+        paragraphs = await asyncio.to_thread(
+            self._parse_paragraphs_from_bytes, body_bytes,
+        )
         images = await asyncio.to_thread(_extract_docx_images, body_bytes)
         vision_payload = await describe_document_images(
             settings=get_settings(),

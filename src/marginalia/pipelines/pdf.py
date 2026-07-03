@@ -30,7 +30,7 @@ from marginalia.agent.compression_adapter import (
     maybe_compress_ingest_aggregate_view,
     maybe_compress_ingest_view,
 )
-from marginalia.config import has_vision_profile
+from marginalia.config import get_settings, has_vision_profile
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
@@ -77,7 +77,13 @@ PDF_TEXT_MAX_INDEX_PAGES = 400    # hard text-layer ingest budget
 PDF_SECTION_DIGEST_BYTES = 60_000 # cap the aggregate summary prompt
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
-OCR_MAX_PAGES: int | None = None  # None/<=0 means OCR every page at ingest
+# Per-document OCR page cap for scanned PDFs. Seeded from the configurable
+# `ocr_max_pages` setting (env OCR_MAX_PAGES) so the default is bounded rather
+# than fanning out one VLM call per page for arbitrarily long documents.
+# None/<=0 means OCR every page at ingest. Kept as a module-level constant
+# (rather than reading settings inside _ocr_configured_page_cap) so tests and
+# callers can override it directly.
+OCR_MAX_PAGES: int | None = get_settings().ocr_max_pages
 PDF_READ_MAX_PAGES_PER_CALL = 50
 PDF_PATTERN_UNSCOPED_MAX_PAGES = 200
 PDF_DEFAULT_READ_PAGES = 20
@@ -196,9 +202,14 @@ class PdfPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body = await self._read_bytes(storage, ctx.storage_key)
-        total_pages = self._page_count(body)
+        # pypdf page-count and per-page layout text extraction are pure-CPU
+        # and can take tens of seconds on large PDFs — offload them so the
+        # event loop and worker heartbeats stay responsive.
+        total_pages = await asyncio.to_thread(self._page_count, body)
         text_index_pages = min(total_pages, PDF_TEXT_MAX_INDEX_PAGES)
-        text_per_page = self._extract_text(body, max_pages=text_index_pages)
+        text_per_page = await asyncio.to_thread(
+            self._extract_text, body, max_pages=text_index_pages,
+        )
 
         vlm_available = has_vision_profile()
 
@@ -253,7 +264,9 @@ class PdfPipeline(Pipeline):
         if ocr_used or not vlm_available:
             described = []
         else:
-            images = extract_images(body, max_pages=indexed_pages)
+            images = await asyncio.to_thread(
+                extract_images, body, max_pages=indexed_pages,
+            )
             described = await describe_images(images) if images else []
 
         if self._needs_chunked_index(text_per_page[:indexed_pages], described):

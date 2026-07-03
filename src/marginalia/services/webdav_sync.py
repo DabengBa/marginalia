@@ -713,6 +713,7 @@ async def publish_selected(
             remote_rows=remote_rows,
             local_rows=local_rows,
             selected_entry_ids=selected,
+            scoped=True,
         )
         manifest = _manifest_for_rows(
             snapshot_id=snapshot_id,
@@ -1259,13 +1260,28 @@ def _merge_snapshot_rows(
     remote_rows: dict[str, list[dict[str, Any]]],
     local_rows: dict[str, list[dict[str, Any]]],
     selected_entry_ids: set[str],
+    scoped: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
+    """Merge remote snapshot rows with the local rows being published.
+
+    A full publish (`scoped=False`) merges the complete local taxonomy so a
+    machine that never pulled cannot silently drop rows other machines wrote.
+
+    A selective publish (`scoped=True`) must NOT leak the user's whole library
+    onto a possibly-shared remote (audit 二.23): only the taxonomy REACHABLE
+    from the selected entries rides along — the folder/catalog ancestor chains
+    and the tags actually attached to those entries (plus their aliases).
+    Unrelated folders, unused tags, saved views, and the private agent
+    sessions/conversations/journals are dropped from the local side entirely
+    (remote rows for those files are still preserved).
+    """
+    selected_local_entries = [
+        row for row in local_rows.get("entries.jsonl", [])
+        if str(row.get("entry_id") or "") in selected_entry_ids
+    ]
     entries = _merge_by_key(
         remote_rows.get("entries.jsonl", []),
-        [
-            row for row in local_rows.get("entries.jsonl", [])
-            if str(row.get("entry_id") or "") in selected_entry_ids
-        ],
+        selected_local_entries,
         "entry_id",
     )
     entry_ids = {str(row.get("entry_id") or "") for row in entries}
@@ -1279,50 +1295,135 @@ def _merge_snapshot_rows(
         if str(row.get("entry_a_id") or "") in entry_ids
         and str(row.get("entry_b_id") or "") in entry_ids
     ]
+
+    if scoped:
+        local_folder_rows = _scoped_ancestor_rows(
+            local_rows.get("folders.jsonl", []),
+            id_key="folder_id",
+            seed_ids=_row_field_values(selected_local_entries, "folder_id"),
+        )
+        local_catalog_rows = _scoped_ancestor_rows(
+            local_rows.get("catalogs.jsonl", []),
+            id_key="catalog_id",
+            seed_ids=_row_field_values(selected_local_entries, "catalog_id"),
+        )
+        attached_tag_ids = _attached_tag_ids(selected_local_entries)
+        local_tag_rows = [
+            row for row in local_rows.get("tags.jsonl", [])
+            if str(row.get("tag_id") or "") in attached_tag_ids
+        ]
+        local_tag_alias_rows = [
+            row for row in local_rows.get("tag_aliases.jsonl", [])
+            if str(row.get("to_tag_id") or "") in attached_tag_ids
+        ]
+        local_view_rows: list[dict[str, Any]] = []
+        local_session_rows: list[dict[str, Any]] = []
+        local_conversation_rows: list[dict[str, Any]] = []
+        local_journal_rows: list[dict[str, Any]] = []
+    else:
+        local_folder_rows = local_rows.get("folders.jsonl", [])
+        local_catalog_rows = local_rows.get("catalogs.jsonl", [])
+        local_tag_rows = local_rows.get("tags.jsonl", [])
+        local_tag_alias_rows = local_rows.get("tag_aliases.jsonl", [])
+        local_view_rows = local_rows.get("views.jsonl", [])
+        local_session_rows = local_rows.get("sessions.jsonl", [])
+        local_conversation_rows = local_rows.get("conversations.jsonl", [])
+        local_journal_rows = local_rows.get("journals.jsonl", [])
+
     return {
         "folders.jsonl": _merge_by_key(
             remote_rows.get("folders.jsonl", []),
-            local_rows.get("folders.jsonl", []),
+            local_folder_rows,
             "folder_id",
         ),
         "catalogs.jsonl": _merge_by_key(
             remote_rows.get("catalogs.jsonl", []),
-            local_rows.get("catalogs.jsonl", []),
+            local_catalog_rows,
             "catalog_id",
         ),
         "views.jsonl": _merge_by_key(
             remote_rows.get("views.jsonl", []),
-            local_rows.get("views.jsonl", []),
+            local_view_rows,
             "view_id",
         ),
         "tags.jsonl": _merge_by_key(
             remote_rows.get("tags.jsonl", []),
-            local_rows.get("tags.jsonl", []),
+            local_tag_rows,
             "tag_id",
         ),
         "tag_aliases.jsonl": _merge_by_key(
             remote_rows.get("tag_aliases.jsonl", []),
-            local_rows.get("tag_aliases.jsonl", []),
+            local_tag_alias_rows,
             "tag_alias_id",
         ),
         "entries.jsonl": entries,
         "relations.jsonl": relations,
         "sessions.jsonl": _merge_by_key(
             remote_rows.get("sessions.jsonl", []),
-            local_rows.get("sessions.jsonl", []),
+            local_session_rows,
             "session_id",
         ),
         "conversations.jsonl": _merge_by_key(
             remote_rows.get("conversations.jsonl", []),
-            local_rows.get("conversations.jsonl", []),
+            local_conversation_rows,
             "conversation_id",
         ),
         "journals.jsonl": _merge_by_key(
             remote_rows.get("journals.jsonl", []),
-            local_rows.get("journals.jsonl", []),
+            local_journal_rows,
             "journal_id",
         ),
     }
+
+
+def _row_field_values(rows: list[dict[str, Any]], field: str) -> set[str]:
+    return {
+        str(row.get(field) or "")
+        for row in rows
+        if row.get(field)
+    }
+
+
+def _attached_tag_ids(entry_rows: list[dict[str, Any]]) -> set[str]:
+    out: set[str] = set()
+    for row in entry_rows:
+        for tag in row.get("tags") or []:
+            if isinstance(tag, dict):
+                tag_id = str(tag.get("tag_id") or "")
+                if tag_id:
+                    out.add(tag_id)
+    return out
+
+
+def _scoped_ancestor_rows(
+    rows: list[dict[str, Any]],
+    *,
+    id_key: str,
+    seed_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Local `rows` whose id is a seed or an ancestor of a seed, walking the
+    `parent_id` chain upward. A missing parent or a parent_id cycle (possible
+    via a WebDAV import) terminates the walk — the `reachable` visited set
+    guards against looping forever."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_id = str(row.get(id_key) or "")
+        if row_id:
+            by_id[row_id] = row
+    reachable: set[str] = set()
+    stack = [seed for seed in seed_ids if seed]
+    while stack:
+        cur = stack.pop()
+        if cur in reachable:
+            continue
+        reachable.add(cur)
+        row = by_id.get(cur)
+        if row is None:
+            continue
+        parent = str(row.get("parent_id") or "")
+        if parent and parent not in reachable:
+            stack.append(parent)
+    return [by_id[row_id] for row_id in reachable if row_id in by_id]
 
 
 def _merge_by_key(

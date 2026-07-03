@@ -104,7 +104,20 @@ const installMarginaliaInto = (runtimeRoot) => {
   const py = resolveRuntimePython(runtimeRoot);
   console.log(`[prepare-backend] Installing marginalia into ${runtimeRoot} via ${py}`);
   runChecked(py, ['-m', 'pip', 'install', '--upgrade', 'pip'], projectRoot);
-  runChecked(py, ['-m', 'pip', 'install', '--no-warn-script-location', '.'], projectRoot);
+
+  // Locked install: export the exact versions CI resolved from uv.lock, install
+  // those first, then the project itself with --no-deps so no '>=' constraint is
+  // re-resolved at build time (matches the Dockerfile builder). `--no-hashes` is
+  // needed because two deps are git+https refs pip can't hash. The requirements
+  // file is written to the runtime's parent dir so it is NOT copied into the
+  // bundle by copyRuntimeToBundleResources.
+  const reqPath = path.join(path.dirname(runtimeRoot), 'marginalia-requirements.txt');
+  runChecked('uv', [
+    'export', '--locked', '--no-dev', '--no-emit-project', '--no-hashes',
+    '-o', reqPath,
+  ], projectRoot, { UV_PYTHON_DOWNLOADS: 'never' });
+  runChecked(py, ['-m', 'pip', 'install', '--no-warn-script-location', '-r', reqPath], projectRoot);
+  runChecked(py, ['-m', 'pip', 'install', '--no-deps', '--no-warn-script-location', '.'], projectRoot);
 };
 
 const copyRuntimeToBundleResources = async (runtimeRoot) => {

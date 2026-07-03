@@ -741,6 +741,12 @@ const en = {
     apiKey: "API key",
     keepKeyHint: "Leave blank to keep the existing key. Type a new key to replace.",
     reset: "Reset to default",
+    testConnection: "Test connection",
+    testing: "Testing…",
+    testOk: "OK",
+    testNotConfigured: "not configured",
+    reprocessedFailed: (n: number) =>
+      `Retrying ${n} previously-failed file${n === 1 ? "" : "s"}…`,
   },
 };
 
@@ -1471,6 +1477,11 @@ const zh: I18nStrings = {
     apiKey: "API key",
     keepKeyHint: "留空表示保留现有 key。输入新 key 则替换。",
     reset: "恢复默认",
+    testConnection: "测试连接",
+    testing: "测试中…",
+    testOk: "正常",
+    testNotConfigured: "未配置",
+    reprocessedFailed: (n: number) => `正在重试 ${n} 个此前失败的文件…`,
   },
 };
 

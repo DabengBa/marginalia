@@ -20,25 +20,44 @@ PUT accepts new api_keys but the response strips them again.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.config import (
+    _REQUIRED_PROFILES,
     LLM_PROFILES_VISIBLE,
+    Settings,
     get_settings,
     has_vision_profile,
     resolve_profile,
 )
-from marginalia.llm.factory import reset_clients_cache
+from marginalia.db.models import File
+from marginalia.db.session import get_session
+from marginalia.llm.factory import get_chat_client, reset_clients_cache
+from marginalia.llm.types import ChatMessage, ChatRequest
+from marginalia.repositories import files as files_repo
 from marginalia.semantic.index import semantic_index_status
 from marginalia.services.config_overlay import (
     OverlayValidationError, read_overlay, validate_and_normalize, write_overlay,
 )
+from marginalia.services.reprocess import reprocess_file
 from marginalia.services.webdav_sync import read_status as read_webdav_status
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+# Cap the auto-heal fan-out so a single settings PUT can't kick off an
+# unbounded reprocess when a large library failed before a key was set.
+_AUTOHEAL_MAX = 500
+
+# Provider errors can be long and may embed the base_url; keep the surfaced
+# message short and strip the api_key if it ever appears in the text.
+_MAX_ERROR_CHARS = 400
 
 
 def _mask(secret: str | None) -> str | None:
@@ -179,6 +198,97 @@ def llm_settings() -> dict[str, Any]:
     }
 
 
+def _safe_error(exc: Exception, api_key: str | None) -> str:
+    """Provider message trimmed for the client — redact the api_key if it
+    leaked into the text, cap the length. Full detail is logged server-side."""
+    msg = str(exc).strip() or exc.__class__.__name__
+    if api_key and api_key in msg:
+        msg = msg.replace(api_key, "***")
+    if len(msg) > _MAX_ERROR_CHARS:
+        msg = msg[:_MAX_ERROR_CHARS] + "…"
+    return msg
+
+
+async def _probe_llm_profile(profile: str) -> dict[str, Any]:
+    """One ~1-token chat call to confirm a profile's key/base_url/model
+    actually work. Returns {ok: True, model, provider} on success or
+    {ok: False, error} with the (sanitized) provider message on failure."""
+    api_key = resolve_profile(get_settings(), profile).api_key
+    try:
+        client = get_chat_client(profile)
+        await client.complete(
+            ChatRequest(
+                system=None,
+                messages=[ChatMessage(role="user", content="ping")],
+                max_tokens=1,
+            )
+        )
+        return {"ok": True, "model": client.model, "provider": client.provider}
+    except Exception as exc:  # noqa: BLE001 - reported per-profile, logged here
+        log.warning("llm test failed for profile %s: %s", profile, exc)
+        return {"ok": False, "error": _safe_error(exc, api_key)}
+
+
+@router.post("/llm/test")
+async def test_llm_profiles() -> dict[str, Any]:
+    """Probe each resolved LLM profile with a tiny chat call so a mistyped
+    key / base-URL / model is caught here at config time instead of surfacing
+    later as a failed ingest or chat turn. Mirrors the WebDAV `POST /test`
+    onboarding pattern.
+
+    Returns ``{"profiles": {name: {...}}}`` where each entry is either
+    ``{ok: True, model, provider}``, ``{ok: False, error}``, or — for an
+    unconfigured optional profile — ``{ok: None, configured: False}``. The
+    call always returns 200; per-profile status carries the verdict."""
+    s = get_settings()
+    results: dict[str, dict[str, Any]] = {}
+    # De-dupe the network calls: chat/reflect/ingest usually resolve to the
+    # same endpoint (all inheriting LLM_DEFAULT_*), so probe each distinct
+    # (provider, base_url, model, key) once and reuse the verdict.
+    seen: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for p in LLM_PROFILES_VISIBLE:
+        if p == "vision" and not has_vision_profile(s):
+            results[p] = {"ok": None, "configured": False}
+            continue
+        prof = resolve_profile(s, p)
+        sig = (prof.provider, prof.base_url, prof.model, prof.api_key)
+        verdict = seen.get(sig)
+        if verdict is None:
+            verdict = await _probe_llm_profile(p)
+            seen[sig] = verdict
+        results[p] = verdict
+    return {"profiles": results}
+
+
+def _has_required_profiles(s: Settings) -> bool:
+    """Whether every required profile now resolves to a usable key + model.
+    Gates the post-PUT auto-heal so failed ingests are retried only once the
+    config can actually succeed."""
+    for p in _REQUIRED_PROFILES:
+        prof = resolve_profile(s, p)
+        if not prof.api_key or not prof.model:
+            return False
+    return True
+
+
+async def _reprocess_failed_ingests(session: AsyncSession) -> int:
+    """Re-enqueue files whose ingest failed (typically before a valid key was
+    configured). Bounded by _AUTOHEAL_MAX; caller's request owns the txn."""
+    file_ids = (
+        await files_repo.list_live_ids(session, ingest_status="failed")
+    )[:_AUTOHEAL_MAX]
+    healed = 0
+    for fid in file_ids:
+        file_row = await session.get(File, fid)
+        if file_row is None or file_row.deleted_at is not None:
+            continue
+        await reprocess_file(session, file_row, scheduled_by="llm_configured")
+        healed += 1
+    if healed:
+        await session.commit()
+    return healed
+
+
 class LlmPatchBody(BaseModel):
     """Subset of overlay fields a PUT may touch.
 
@@ -194,8 +304,14 @@ class LlmPatchBody(BaseModel):
 
 
 @router.put("/llm")
-def update_llm_settings(body: LlmPatchBody) -> dict[str, Any]:
+async def update_llm_settings(
+    body: LlmPatchBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
     s = get_settings()
+    # Snapshot validity BEFORE the write so we only auto-heal on the edge where
+    # required profiles first become valid — not on every unrelated PUT.
+    was_valid = _has_required_profiles(s)
     try:
         clean = validate_and_normalize(body.patch)
     except OverlayValidationError as e:
@@ -219,4 +335,18 @@ def update_llm_settings(body: LlmPatchBody) -> dict[str, Any]:
     get_settings.cache_clear()  # type: ignore[attr-defined]
     reset_clients_cache()
 
-    return llm_settings()
+    payload = llm_settings()
+
+    # Auto-heal: if this PUT is the edge where required profiles first become
+    # valid, retry ingests that failed before a key existed — the top-of-funnel
+    # case where a user would otherwise conclude "nothing happens". Best-effort:
+    # a reprocess error must never fail the settings write itself.
+    if not was_valid and _has_required_profiles(get_settings()):
+        try:
+            healed = await _reprocess_failed_ingests(session)
+            if healed:
+                payload["reprocessed_failed"] = healed
+        except Exception:
+            log.exception("auto-heal reprocess after llm settings PUT failed")
+
+    return payload

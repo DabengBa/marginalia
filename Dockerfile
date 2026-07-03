@@ -33,15 +33,38 @@ RUN if [ -n "$APT_MIRROR" ]; then \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY pyproject.toml README.md ./
+
+# uv is used only to export a locked requirements.txt from uv.lock — the same
+# lockfile CI resolves against — so the image ships the exact versions the
+# tests exercised instead of re-resolving every '>=' at build time. It stays
+# in the builder stage and never reaches the runtime image.
+RUN pip install uv
+
+# --- Dependency layer -------------------------------------------------------
+# Only the lock inputs land in this layer's context, so a source-only change
+# does NOT bust the (slow) dependency install below — including the two git
+# clones. `uv export --locked` doubles as a drift gate: the build fails if
+# uv.lock is out of sync with pyproject.toml. `--no-hashes` is required
+# because two deps are git+https refs (markitdown, glowpy) pip can't hash, and
+# pip rejects a file mixing hashed and unhashed requirements. `--no-emit-
+# project` drops marginalia itself; it is installed from source below.
+# UV_PYTHON_DOWNLOADS=never keeps uv on the base image's interpreter instead of
+# fetching one over the network.
+COPY pyproject.toml uv.lock ./
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --upgrade pip \
+ && UV_PYTHON_DOWNLOADS=never uv export --locked --no-dev --no-emit-project --no-hashes -o requirements.txt \
+ && /opt/venv/bin/pip install -r requirements.txt
+
+# --- Project layer ----------------------------------------------------------
+# Source + packaging inputs only; `--no-deps` installs marginalia itself
+# without re-resolving the dependency graph already pinned above. README.md is
+# required here because hatchling reads it to build the wheel.
+COPY README.md ./
 COPY src ./src
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
-
-# Install into an isolated prefix we then copy into the runtime stage.
-RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install .
+RUN /opt/venv/bin/pip install --no-deps .
 
 
 FROM python:${PYTHON_VERSION}-slim AS runtime

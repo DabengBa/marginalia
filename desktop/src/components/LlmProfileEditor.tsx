@@ -12,9 +12,10 @@
  *  is set. Typing replaces it; leaving it blank keeps whatever's
  *  already configured. */
 import { useEffect, useMemo, useState } from "react";
-import { Save, RotateCcw, Loader2 } from "lucide-react";
+import { Save, RotateCcw, Loader2, CheckCircle2, XCircle } from "lucide-react";
 
 import { settings as settingsApi } from "@/api/client";
+import type { LlmTestResult } from "@/api/client";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
@@ -29,10 +30,56 @@ interface Props {
 }
 
 export function LlmProfileEditor({ data, onChange }: Props) {
+  const { t } = useI18n();
   const [open, setOpen] = useState<LlmProfileName | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResults, setTestResults] = useState<Record<string, LlmTestResult> | null>(null);
+  const [testErr, setTestErr] = useState<string | null>(null);
+
+  const runTest = async () => {
+    setTesting(true);
+    setTestErr(null);
+    try {
+      const res = await settingsApi.testLlm();
+      setTestResults(res.profiles);
+    } catch (e: unknown) {
+      setTestErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   return (
     <div className="space-y-2">
+      <div className="flex items-center justify-end">
+        <button
+          onClick={runTest}
+          disabled={testing}
+          className={cn(
+            "flex items-center gap-1.5 rounded border border-border px-2.5 py-1 text-xs font-medium",
+            "hover:bg-bg-subtle disabled:opacity-40",
+          )}
+        >
+          {testing && <Loader2 size={12} className="animate-spin" />}
+          {testing ? t.llm.testing : t.llm.testConnection}
+        </button>
+      </div>
+
+      {testErr && (
+        <p className="rounded bg-danger/10 px-2 py-1 text-xs text-danger">{testErr}</p>
+      )}
+
+      {testResults && (
+        <div className="space-y-1 rounded-md border border-border bg-bg-subtle px-3 py-2 text-xs">
+          {Object.entries(testResults).map(([name, r]) => (
+            <div key={name} className="flex items-start gap-2">
+              <span className="w-16 shrink-0 font-medium capitalize">{name}</span>
+              <TestStatus result={r} />
+            </div>
+          ))}
+        </div>
+      )}
+
       {PROFILES.map((name) => (
         <ProfileRow
           key={name}
@@ -44,6 +91,30 @@ export function LlmProfileEditor({ data, onChange }: Props) {
         />
       ))}
     </div>
+  );
+}
+
+function TestStatus({ result }: { result: LlmTestResult }) {
+  const { t } = useI18n();
+  if (result.ok === null) {
+    return <span className="text-fg-subtle">{t.llm.testNotConfigured}</span>;
+  }
+  if (result.ok) {
+    return (
+      <span className="flex items-center gap-1 text-accent">
+        <CheckCircle2 size={12} className="shrink-0" />
+        {t.llm.testOk}
+        {result.model && (
+          <span className="font-mono text-fg-subtle">· {result.model}</span>
+        )}
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-start gap-1 text-danger">
+      <XCircle size={12} className="mt-0.5 shrink-0" />
+      <span className="break-all">{result.error}</span>
+    </span>
   );
 }
 
@@ -82,6 +153,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [healed, setHealed] = useState(0);
 
   useEffect(() => {
     setForm({
@@ -91,6 +163,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       api_key: "",
     });
     setErr(null);
+    setHealed(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, isOpen]);
 
@@ -127,6 +200,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       const next = await settingsApi.updateLlm(patch);
       onChange(next);
       setSavedAt(Date.now());
+      setHealed(next.reprocessed_failed ?? 0);
       setForm((f) => ({ ...f, api_key: "" }));
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -147,6 +221,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       onChange(next);
       setForm({ provider: "", model: "", base_url: "", api_key: "" });
       setSavedAt(Date.now());
+      setHealed(0);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -289,6 +364,11 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           {savedAt && !saving && (
             <p className="text-right text-xs text-fg-subtle">
               {t.common.saved} · {new Date(savedAt).toLocaleTimeString()}
+            </p>
+          )}
+          {healed > 0 && !saving && (
+            <p className="text-right text-xs text-accent">
+              {t.llm.reprocessedFailed(healed)}
             </p>
           )}
         </div>

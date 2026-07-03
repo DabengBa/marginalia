@@ -2,7 +2,13 @@
 but pinning lets adapters share connection pools across calls)."""
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
 from functools import lru_cache
+
+import anthropic
+import openai
 
 from marginalia.config import (
     LlmProfile,
@@ -20,6 +26,77 @@ from marginalia.llm.model_controls import (
 from marginalia.llm.openai_adapter import OpenAIAudioClient, OpenAIChatClient
 from marginalia.llm.types import ChatRequest, ChatResponse
 from marginalia.model_rate_limit import acquire_model_call_slot
+
+log = logging.getLogger(__name__)
+
+
+# --- transient-failure retry policy -----------------------------------------
+# Number of RETRIES (in addition to the first attempt) for transient provider
+# failures. Kept small so a genuinely-down provider still fails reasonably
+# fast; the SDKs also retry a couple of times internally per attempt, so the
+# effective attempt count is bounded and sane.
+_MAX_RETRY_ATTEMPTS = 3
+_RETRY_BASE_SECONDS = 0.5
+_RETRY_MAX_SECONDS = 20.0
+# HTTP statuses that are safe to retry. 429 is handled via RateLimitError;
+# these are transient server-side failures / overload signals (529 = Anthropic
+# "Overloaded"). 4xx other than 429 (e.g. a 400 BadRequestError) are NOT here.
+_RETRYABLE_STATUS = frozenset({500, 502, 503, 504, 529})
+# Exception types from either SDK. APITimeoutError subclasses APIConnectionError
+# in both openai and anthropic, so the connection base covers timeouts too.
+_CONNECTION_ERRORS: tuple[type[BaseException], ...] = (
+    openai.APIConnectionError,
+    anthropic.APIConnectionError,
+)
+_RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (
+    openai.RateLimitError,
+    anthropic.RateLimitError,
+)
+_STATUS_ERRORS: tuple[type[BaseException], ...] = (
+    openai.APIStatusError,
+    anthropic.APIStatusError,
+)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """True for provider failures worth retrying: rate limits, connection/
+    timeout errors, and 5xx/overloaded statuses. BadRequestError and any other
+    4xx (a 400/404/422 APIStatusError) are NOT transient and return False, so
+    they propagate immediately without discarding the turn on the next try."""
+    if isinstance(exc, _CONNECTION_ERRORS):
+        return True
+    if isinstance(exc, _RATE_LIMIT_ERRORS):
+        return True
+    if isinstance(exc, _STATUS_ERRORS):
+        return getattr(exc, "status_code", None) in _RETRYABLE_STATUS
+    return False
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Numeric Retry-After (seconds) off the error's HTTP response, if present.
+    Date-form Retry-After values are ignored (caller falls back to backoff)."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_delay(exc: BaseException, attempt: int) -> float:
+    """Seconds to wait before the next attempt: a server-supplied Retry-After
+    when present, else exponential backoff with jitter — both capped."""
+    retry_after = _retry_after_seconds(exc)
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        delay = _RETRY_BASE_SECONDS * (2**attempt) + random.uniform(0, _RETRY_BASE_SECONDS)
+    return min(delay, _RETRY_MAX_SECONDS)
 
 
 class _UsageRecordingChatClient:
@@ -49,20 +126,51 @@ class _UsageRecordingChatClient:
     async def complete(self, request: ChatRequest) -> ChatResponse:
         if self._disable_thinking_by_default:
             request = with_disabled_thinking(request)
-        await acquire_model_call_slot(
-            kind="chat",
-            provider=self.provider,
-            base_url=self._base_url,
-            model=self.model,
-            tps=self._tps,
-        )
         # Import here to avoid a circular dep at module import time
         # (tasks.usage doesn't import llm, but tasks.runner does, and
         # tasks.runner imports through this factory).
         from marginalia.tasks.usage import record_chat_use
-        resp = await self._inner.complete(request)
-        record_chat_use(resp.usage)
-        return resp
+
+        # Bounded retry-with-backoff around the single provider call every chat
+        # completion flows through. Without this a transient rate-limit / 5xx /
+        # overloaded window that outlives the SDK's quick internal retries would
+        # propagate out of complete() and discard the whole agent turn (all
+        # accumulated tool work). Each attempt re-paces via acquire_model_call_slot
+        # and honors a server-supplied Retry-After. Non-transient errors
+        # (BadRequestError / other 4xx / ValueError) propagate immediately.
+        last_exc: BaseException | None = None
+        for attempt in range(_MAX_RETRY_ATTEMPTS + 1):
+            await acquire_model_call_slot(
+                kind="chat",
+                provider=self.provider,
+                base_url=self._base_url,
+                model=self.model,
+                tps=self._tps,
+            )
+            try:
+                resp = await self._inner.complete(request)
+            except Exception as exc:
+                if attempt >= _MAX_RETRY_ATTEMPTS or not _is_transient_error(exc):
+                    raise
+                last_exc = exc
+                delay = _retry_delay(exc, attempt)
+                log.warning(
+                    "transient provider error on profile %s (attempt %d/%d): %s; "
+                    "retrying in %.2fs",
+                    self.profile_name,
+                    attempt + 1,
+                    _MAX_RETRY_ATTEMPTS + 1,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            record_chat_use(resp.usage)
+            return resp
+        # The loop only exits via return or raise; this keeps type-checkers
+        # satisfied that a value is always produced.
+        assert last_exc is not None
+        raise last_exc
 
 
 def _build_chat(profile: LlmProfile) -> ChatClient:

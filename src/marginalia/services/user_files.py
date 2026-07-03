@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent.text_query import normalize_text_queries
 from marginalia.db.models import File, FileEntry, Folder
 from marginalia.pipelines.registry import resolve_pipeline
 from marginalia.repositories import entries as entries_repo
@@ -105,9 +106,16 @@ async def search_entries(
     if not q:
         return []
     limit = max(1, min(limit, SEARCH_LIMIT_MAX))
-    like = f"%{q}%"
+    # Split the box query into OR'd terms exactly like the agent tools do
+    # (whitespace + CJK separators, honoring quoted phrases) so "transformer
+    # survey" or "机器学习 笔记" match when the words appear separately, and
+    # route it through search_filtered so hits come back ordered by FTS rank
+    # rather than being required to occur as one contiguous phrase.
+    terms = normalize_text_queries(q)
+    if not terms:
+        return []
 
-    rows = await entries_repo.search_with_file(session, like=like, limit=limit)
+    rows = await entries_repo.search_filtered(session, text=terms, limit=limit)
 
     out: list[dict[str, Any]] = []
     for entry, file_row in rows:
