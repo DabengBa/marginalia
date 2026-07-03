@@ -164,11 +164,14 @@ class Settings(BaseSettings):
     llm_audio_tps: int = Field(default=10, ge=1, le=10_000)
 
     # --- Agent token budgets ------------------------------------------------
-    # Per-call max_tokens for the planner / executor.
+    # Per-call max_tokens for the planner / executor. Sized for *reasoning*
+    # models (DeepSeek/Qwen "thinking" variants), which spend most of their
+    # output budget on hidden reasoning before any visible text — too small a
+    # cap gets consumed by reasoning and truncates the plan/answer.
     # If the executor hits `stop_reason=max_tokens` during the final answer,
     # runtime.py can continue instead of returning a half-finished answer.
-    agent_plan_max_tokens: int = 1024
-    agent_execute_max_tokens: int = 2048
+    agent_plan_max_tokens: int = 2048
+    agent_execute_max_tokens: int = 4096
     agent_execute_max_turns: int = 15
     agent_final_answer_continue_turns: int = 3
     agent_final_answer_max_chars: int = 120_000

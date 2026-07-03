@@ -523,6 +523,16 @@ async def _describe_images_via_vision(
                 temperature=0.0,
             ))
             text = (resp.text or "").strip()
+            if not text:
+                # A reasoning VLM that hit the token cap before emitting visible
+                # text returns empty — log it so this is diagnosable rather than
+                # a silent "(description unavailable)".
+                log.warning(
+                    "vision fallback: empty description for image %d "
+                    "(stop_reason=%s, out_tokens=%s) — model may have spent the "
+                    "token budget on reasoning; raise vision max_tokens",
+                    idx, resp.stop_reason, resp.usage.output_tokens,
+                )
         except Exception:
             log.exception("vision fallback: image %d description failed", idx)
             text = ""
