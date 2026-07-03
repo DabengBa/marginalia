@@ -375,7 +375,12 @@ class _BudgetState:
 # Each is one sequential vision call, so this bounds the pre-plan latency
 # (agent_turn_timeout_seconds still applies on top).
 _VISION_FALLBACK_MAX_IMAGES = 4
-_VISION_FALLBACK_MAX_TOKENS = 512
+# Generous budget: a *reasoning* vision model (e.g. Qwen "thinking" variants)
+# spends most of its output tokens on hidden reasoning before emitting any
+# visible description, so a small cap gets consumed by reasoning and returns an
+# empty (— "unavailable") description. Leave ample room for reasoning + a full
+# transcription/description.
+_VISION_FALLBACK_MAX_TOKENS = 4096
 _VISION_FALLBACK_MARKER = (
     "--- Pasted image (auto-described; chat model has no vision) ---"
 )
