@@ -270,7 +270,10 @@ async def test_ping_answered_while_slow_tools_call_in_flight(
 async def test_upload_file_expands_tilde(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # expanduser reads HOME on POSIX but USERPROFILE on Windows — set both so
+    # ~ resolves to tmp_path on every platform.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
     def handler(request: httpx.Request) -> httpx.Response:  # never reached
         return httpx.Response(200, json={})
