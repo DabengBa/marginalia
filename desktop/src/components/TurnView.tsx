@@ -16,6 +16,7 @@ import { useNavigate } from "react-router-dom";
 
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EntryLocator } from "@/components/MarkdownView";
+import type { ChatImage } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 
@@ -50,6 +51,10 @@ export interface TurnMetrics {
 export interface Turn {
   query: string;
   conversationId?: string;
+  /** Images attached to this user turn. Present only on live turns that
+   *  were sent with attachments; historical/replayed turns omit them since
+   *  image bytes are never persisted or replayed. */
+  images?: ChatImage[];
   steps: Step[];
   answer: string | null;
   metrics?: TurnMetrics;
@@ -100,6 +105,19 @@ export function TurnView({ turn }: { turn: Turn }) {
         </div>
         <div className="whitespace-pre-wrap text-sm">{turn.query}</div>
       </div>
+
+      {turn.images && turn.images.length > 0 && (
+        <div className="ml-8 mb-2 flex flex-wrap gap-2">
+          {turn.images.map((img, i) => (
+            <img
+              key={i}
+              src={`data:${img.media_type};base64,${img.data_b64}`}
+              alt={t.chat.imageAlt(i + 1)}
+              className="h-16 w-16 rounded-md border border-border object-cover"
+            />
+          ))}
+        </div>
+      )}
 
       {showSteps && (
         <div className="ml-8 mb-2">

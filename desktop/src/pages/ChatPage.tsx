@@ -14,18 +14,21 @@
  */
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { AlertCircle, Gauge, Send, Square, Sparkles, Zap } from "lucide-react";
+import { AlertCircle, Gauge, Send, Square, Sparkles, X, Zap } from "lucide-react";
 
 import { sessions, settings as settingsApi } from "@/api/client";
 import { streamChat } from "@/api/chatStream";
 import type {
-  ChatEvent, ChatMode, LlmSettings, PlanBudgetData, ReplayedTurn, ReplayedToolCall,
+  ChatEvent, ChatImage, ChatMode, LlmSettings, PlanBudgetData, ReplayedTurn, ReplayedToolCall,
   ThinkingEventData,
 } from "@/types/api";
 import { TurnView, type Turn, type Step } from "@/components/TurnView";
 import { SessionList } from "@/components/SessionList";
 import { useChatSession } from "@/lib/chatSession";
-import { cn } from "@/lib/utils";
+import {
+  cn, formatBytes, fileToChatImage, isSupportedChatImageType,
+  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGE_MAX_BYTES, type PendingChatImage,
+} from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 /** Module-level in-flight SSE streams.
@@ -53,6 +56,9 @@ export function ChatPage() {
   const loading = useChatSession((s) => s.loading);
   const { setTurns, setChatMode, setStreaming, setLoading, reset } = useChatSession();
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [imageErr, setImageErr] = useState<string | null>(null);
   const [openErr, setOpenErr] = useState<string | null>(null);
   const [llmReady, setLlmReady] = useState<boolean | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -125,17 +131,101 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Read image files into pending attachments, enforcing the same caps the
+  // server does (count + per-image bytes + media type) so the user gets a
+  // friendly inline message instead of an HTTP 413/400 after sending.
+  const addImageFiles = useCallback(async (files: File[]) => {
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (imgs.length === 0) return;
+    const room = Math.max(0, CHAT_IMAGE_MAX_COUNT - pendingImages.length);
+    const accepted: PendingChatImage[] = [];
+    let tooMany = false, tooLarge = false, badType = false, readFailed = false;
+    for (const f of imgs) {
+      if (!isSupportedChatImageType(f.type)) { badType = true; continue; }
+      if (f.size > CHAT_IMAGE_MAX_BYTES) { tooLarge = true; continue; }
+      if (accepted.length >= room) { tooMany = true; continue; }
+      try {
+        accepted.push(await fileToChatImage(f));
+      } catch {
+        readFailed = true;
+      }
+    }
+    if (accepted.length > 0) setPendingImages((prev) => [...prev, ...accepted]);
+    setImageErr(
+      tooMany ? i18n.chat.imageTooMany(CHAT_IMAGE_MAX_COUNT)
+        : tooLarge ? i18n.chat.imageTooLarge(formatBytes(CHAT_IMAGE_MAX_BYTES))
+          : badType ? i18n.chat.unsupportedImageType
+            : readFailed ? i18n.chat.imageReadFailed
+              : null,
+    );
+  }, [pendingImages, i18n]);
+
+  const removeImage = useCallback((id: string) => {
+    setPendingImages((prev) => prev.filter((p) => p.id !== id));
+    setImageErr(null);
+  }, []);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    // Only hijack the paste when it actually carried image files, so normal
+    // text paste keeps working.
+    if (files.length > 0) {
+      e.preventDefault();
+      void addImageFiles(files);
+    }
+  }, [addImageFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      setDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback(() => setDragOver(false), []);
+
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    setDragOver(false);
+    const dt = e.dataTransfer;
+    if (!dt?.files?.length) return;
+    const files: File[] = [];
+    for (let i = 0; i < dt.files.length; i++) {
+      const f = dt.files[i];
+      if (f.type.startsWith("image/")) files.push(f);
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      void addImageFiles(files);
+    }
+  }, [addImageFiles]);
+
   const send = useCallback(async () => {
     const q = input.trim();
     const { streaming: curStreaming, loading: curLoading } = useChatSession.getState();
     // Block sends while a transcript fetch is in flight: turnIdx and the
     // seeded live.turns would be computed from the previous session's
     // stale turns and corrupt the visible conversation.
-    if (!q || curStreaming || curLoading) return;
+    // Allow an image-only send (blank caption) when at least one image is
+    // attached; still block truly empty sends and while busy.
+    if ((!q && pendingImages.length === 0) || curStreaming || curLoading) return;
     if (llmReady === false) {
       setOpenErr(i18n.chat.llmMissingError);
       return;
     }
+    // Snapshot + clear attachments now: they belong to this turn only.
+    const wireImages: ChatImage[] = pendingImages.map((i) => ({
+      media_type: i.media_type,
+      data_b64: i.data_b64,
+    }));
 
     let sid: string;
     let isFirstTurn = false;
@@ -149,6 +239,8 @@ export function ChatPage() {
 
     setOpenErr(null);
     setInput("");
+    setPendingImages([]);
+    setImageErr(null);
     const ac = new AbortController();
     const gen = ++streamGeneration;
     const turnIdx = useChatSession.getState().turns.length;
@@ -160,7 +252,11 @@ export function ChatPage() {
       mode,
       turns: [
         ...useChatSession.getState().turns,
-        { query: q, steps: [], answer: null, error: null, done: false },
+        {
+          query: q,
+          images: wireImages.length > 0 ? wireImages : undefined,
+          steps: [], answer: null, error: null, done: false,
+        },
       ],
     };
     liveStreams.set(sid, live);
@@ -171,6 +267,7 @@ export function ChatPage() {
       await streamChat(sid, q, {
         signal: ac.signal,
         mode,
+        images: wireImages,
         onEvent: (ev) => {
           const cur = liveStreams.get(sid);
           if (!cur || cur.generation !== gen) return;
@@ -211,7 +308,7 @@ export function ChatPage() {
       }
       if (cur && cur.generation === gen && isFirstTurn) setRefreshSignal((n) => n + 1);
     }
-  }, [input, chatMode, ensureSession, setTurns, setStreaming, i18n, llmReady]);
+  }, [input, pendingImages, chatMode, ensureSession, setTurns, setStreaming, i18n, llmReady]);
 
   const stop = useCallback(() => {
     const sid = useChatSession.getState().sessionId;
@@ -233,6 +330,10 @@ export function ChatPage() {
   const loadSession = useCallback(async (id: string) => {
     setLoading(true);
     setOpenErr(null);
+    // Pending attachments belong to the composer, not any session — drop
+    // them when switching so they never leak into a different conversation.
+    setPendingImages([]);
+    setImageErr(null);
     setSessionId(id);
     const live = liveStreams.get(id);
     if (live) {
@@ -265,6 +366,8 @@ export function ChatPage() {
     reset();
     setOpenErr(null);
     setInput("");
+    setPendingImages([]);
+    setImageErr(null);
   }, [reset]);
 
   return (
@@ -295,7 +398,50 @@ export function ChatPage() {
           </div>
         </div>
 
-        <div className="border-t border-border bg-bg-subtle px-6 py-3">
+        <div
+          className={cn(
+            "border-t border-border bg-bg-subtle px-6 py-3 transition-colors",
+            dragOver && "bg-accent-subtle",
+          )}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          {(pendingImages.length > 0 || imageErr || dragOver) && (
+            <div className="mx-auto mb-2 max-w-5xl">
+              {pendingImages.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {pendingImages.map((img) => (
+                    <div
+                      key={img.id}
+                      className="relative h-16 w-16 overflow-hidden rounded-md border border-border bg-bg-base"
+                    >
+                      <img
+                        src={img.previewUrl}
+                        alt={img.name ?? i18n.chat.imageAlt(1)}
+                        className="h-full w-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeImage(img.id)}
+                        title={i18n.chat.removeImage}
+                        aria-label={i18n.chat.removeImage}
+                        className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-bg-base/85 text-fg-muted shadow-sm hover:text-danger"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {imageErr && (
+                <div className="mt-1 text-[11px] text-danger">{imageErr}</div>
+              )}
+              {dragOver && !imageErr && (
+                <div className="mt-1 text-[11px] text-accent">{i18n.chat.dropImagesHere}</div>
+              )}
+            </div>
+          )}
           <div className="mx-auto flex max-w-5xl items-end gap-2">
             <div
               className="flex h-9 shrink-0 overflow-hidden rounded-md border border-border bg-bg-base p-0.5"
@@ -351,6 +497,7 @@ export function ChatPage() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -376,10 +523,10 @@ export function ChatPage() {
             ) : (
               <button
                 onClick={send}
-                disabled={!input.trim() || loading}
+                disabled={(!input.trim() && pendingImages.length === 0) || loading}
                 className={cn(
                   "flex h-9 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors",
-                  input.trim() && !loading
+                  (input.trim() || pendingImages.length > 0) && !loading
                     ? "bg-accent text-accent-fg hover:opacity-90"
                     : "cursor-not-allowed bg-bg-muted text-fg-subtle",
                 )}

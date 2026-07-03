@@ -12,12 +12,15 @@
  *  pass each frame through onEvent with the raw text so callers can
  *  decide how to decode per type.
  */
-import type { ChatEvent, ChatEventType, ChatMode } from "@/types/api";
+import type { ChatEvent, ChatEventType, ChatImage, ChatMode } from "@/types/api";
 import { authHeaders, getBaseUrl, resolveTauriBaseUrl } from "@/api/client";
 
 export interface ChatStreamOptions {
   signal?: AbortSignal;
   mode?: ChatMode;
+  /** Per-turn image attachments. Raw base64 (no `data:` prefix). Sent only
+   *  with this live turn — never re-sent on resumed/historical turns. */
+  images?: ChatImage[];
   onEvent: (ev: ChatEvent) => void;
   onError?: (err: unknown) => void;
 }
@@ -36,7 +39,11 @@ export async function streamChat(
       Accept: "text/event-stream",
       ...authHeaders(),
     },
-    body: JSON.stringify({ query, mode: opts.mode ?? "auto" }),
+    body: JSON.stringify({
+      query,
+      mode: opts.mode ?? "auto",
+      ...(opts.images?.length ? { images: opts.images } : {}),
+    }),
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {

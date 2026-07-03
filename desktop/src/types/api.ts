@@ -250,6 +250,15 @@ export interface RecentTasks {
 export type OnConflict = "rename" | "error" | "skip";
 export type ChatMode = "auto" | "deep" | "quick";
 
+/** A per-turn image attachment carried in the chat POST body. Mirrors the
+ *  backend llm ImageBlock (media_type + data_b64). `data_b64` is RAW base64
+ *  of the image bytes with NO `data:` URI prefix. Images belong to the
+ *  current turn only and are never persisted or re-sent on later turns. */
+export interface ChatImage {
+  media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  data_b64: string;
+}
+
 /** SSE event names emitted by POST /v1/chat/{session_id}.
  *  Order in a typical turn: conversation → planning → plan → thinking
  *  → (tool_call → tool_result)* → answer → done. `error` may

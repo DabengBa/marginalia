@@ -96,6 +96,32 @@ class Settings(BaseSettings):
         default=0, ge=0, validation_alias="MARGINALIA_UPLOAD_MAX_BYTES",
     )
 
+    # --- Multimodal chat (images pasted/dropped into the composer) ----------
+    # Per-turn caps for images carried on POST /v1/chat. base64 in the JSON
+    # body is decoded eagerly and validated in post_chat BEFORE the SSE
+    # stream starts, so an over-cap request gets a real HTTP 413 instead of
+    # an in-stream error frame. Images belong to the current turn only —
+    # they are never persisted as bytes into conversation history.
+    chat_image_max_count: int = Field(
+        default=4, ge=0, validation_alias="MARGINALIA_CHAT_IMAGE_MAX_COUNT",
+    )
+    chat_image_max_bytes: int = Field(
+        default=10 * 1024 * 1024, ge=0,
+        validation_alias="MARGINALIA_CHAT_IMAGE_MAX_BYTES",
+    )
+    # How pasted chat images reach the model when the `chat` profile might be
+    # text-only. There is no reliable capability API across OpenAI-compatible
+    # providers, so the default `auto` PROBES once per (provider, model): it
+    # sends a 1x1 image and, if the provider rejects image input, remembers the
+    # model is text-only and routes images through the `vision` profile as a
+    # text description thereafter (no-op unless a `vision` profile exists).
+    #   auto → probe + cache (zero config, self-correcting)
+    #   on   → always send images directly (model is known vision-capable)
+    #   off  → always describe via the `vision` profile (model is text-only)
+    chat_vision: Literal["auto", "on", "off"] = Field(
+        default="auto", validation_alias="MARGINALIA_CHAT_VISION",
+    )
+
     # --- LLM defaults (used when a profile leaves a field blank) ------------
     llm_default_provider: LlmProvider = "openai"
     llm_default_api_key: str | None = None

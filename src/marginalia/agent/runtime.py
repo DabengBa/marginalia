@@ -74,12 +74,14 @@ from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
+    ContentBlock,
+    ImageBlock,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     get_chat_client,
 )
-from marginalia.config import get_settings
+from marginalia.config import get_settings, has_vision_profile
 from marginalia.pipelines.pdf_text import (
     PdfTextRange,
     first_page_number,
@@ -367,20 +369,217 @@ class _BudgetState:
         }
 
 
+# ---- multimodal current-turn helpers --------------------------------------
+
+# Max images we describe via the vision fallback before planning starts.
+# Each is one sequential vision call, so this bounds the pre-plan latency
+# (agent_turn_timeout_seconds still applies on top).
+_VISION_FALLBACK_MAX_IMAGES = 4
+_VISION_FALLBACK_MAX_TOKENS = 512
+_VISION_FALLBACK_MARKER = (
+    "--- Pasted image (auto-described; chat model has no vision) ---"
+)
+
+
+# --- vision capability probe (chat_vision="auto") --------------------------
+# A 1x1 grayscale PNG. Sent as a throwaway image so a text-only provider
+# rejects it with a 400 exactly as it would a real image, letting us classify
+# the model without spending real vision tokens.
+_PROBE_IMAGE = ImageBlock(
+    media_type="image/png",
+    data_b64=(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAA"
+        "AgABSK+kcQAAAABJRU5ErkJggg=="
+    ),
+)
+# Per-process cache: (provider, model) -> supports image input. Reset on
+# restart; each API/worker process probes a given model at most once.
+_vision_capability: dict[tuple[str, str], bool] = {}
+def _looks_like_vision_unsupported(exc: Exception) -> bool:
+    """A 400 that clearly blames image/vision input (vs an unrelated bad
+    request like auth/quota/params). We only degrade to the describe fallback
+    on a clear image signal; an ambiguous 400 is left to fail on the real call
+    so the user sees the true error rather than silently losing the image."""
+    msg = str(exc).lower()
+    if any(w in msg for w in ("image", "vision", "multimodal", "image_url")):
+        return True
+    # Some providers phrase it as a modality/content-type support problem.
+    return "modality" in msg and "support" in msg
+
+
+async def _chat_model_supports_vision() -> bool:
+    """Whether the `chat` profile's model accepts image input.
+
+    Probes once per (provider, model) with a 1x1 image and caches the verdict.
+    A vision-unsupported 400 => False; success => True. An ambiguous/transient
+    error (auth, rate limit, network) is NOT cached and optimistically treated
+    as vision-capable so the real turn proceeds (and surfaces that error).
+    """
+    from openai import BadRequestError as _OpenAIBadRequest
+    from anthropic import BadRequestError as _AnthropicBadRequest
+
+    client = get_chat_client("chat")
+    key = (getattr(client, "provider", "?"), getattr(client, "model", "?"))
+    cached = _vision_capability.get(key)
+    if cached is not None:
+        return cached
+    try:
+        await client.complete(ChatRequest(
+            system=None,
+            messages=[ChatMessage(
+                role="user",
+                content=[TextBlock(text="."), _PROBE_IMAGE],
+            )],
+            max_tokens=1,
+        ))
+        _vision_capability[key] = True
+    except (_OpenAIBadRequest, _AnthropicBadRequest) as exc:
+        if _looks_like_vision_unsupported(exc):
+            log.info("chat model %s rejected image input; using vision "
+                     "describe fallback for pasted images", key)
+            _vision_capability[key] = False
+        else:
+            # Unrelated 400 — don't mislabel the model; let the real call run.
+            return True
+    except Exception:
+        # Transient (rate limit / network); assume capable this time.
+        log.warning("vision capability probe for %s failed transiently; "
+                    "assuming vision-capable", key, exc_info=True)
+        return True
+    return _vision_capability[key]
+
+
+def _current_user_content(
+    user_message: str,
+    images: list[ImageBlock] | None,
+) -> str | list[ContentBlock]:
+    """Build the current turn's user message content.
+
+    Plain string when there are no images (keeps history/replay text-only by
+    construction). When images are present, returns a block list with the
+    ImageBlocks attached to THIS turn only; the leading TextBlock is omitted
+    for an image-only turn (blank caption).
+    """
+    if not images:
+        return user_message
+    blocks: list[ContentBlock] = []
+    if user_message.strip():
+        blocks.append(TextBlock(text=user_message))
+    blocks.extend(images)
+    return blocks
+
+
+def _persisted_user_message(user_message: str, image_count: int) -> str:
+    """Fold an image-count placeholder into the persisted turn text.
+
+    The DB `conversations.user_message` column is the ONLY thing history
+    replay reads, so recording '[image attached]' here makes past turns show
+    that a picture was present with zero image bytes re-sent — the whole
+    token-cost goal. The live in-memory user_message stays clean.
+    """
+    if image_count <= 0:
+        return user_message
+    label = (
+        "[image attached]" if image_count == 1
+        else f"[{image_count} images attached]"
+    )
+    base = user_message.strip()
+    return f"{base} {label}" if base else label
+
+
+async def _describe_images_via_vision(
+    images: list[ImageBlock], question: str,
+) -> str:
+    """Text-describe pasted images through the `vision` profile.
+
+    Used only on the fallback path (chat model is text-only). Caller MUST
+    have already confirmed `has_vision_profile(settings)` — get_chat_client
+    raises otherwise. Best-effort: a failing description degrades to a marker
+    rather than aborting the whole turn.
+    """
+    client = get_chat_client("vision")
+    prompt = (
+        "Describe this image in enough detail that a text-only assistant "
+        "could answer questions about it: transcribe any visible text, and "
+        "note figures, layout, and notable visual content."
+    )
+    if question.strip():
+        prompt += f"\nThe user's question about the image(s): {question.strip()}"
+    parts: list[str] = []
+    for idx, image in enumerate(images[:_VISION_FALLBACK_MAX_IMAGES], start=1):
+        try:
+            resp = await client.complete(ChatRequest(
+                system="You are a precise image describer.",
+                messages=[ChatMessage(
+                    role="user",
+                    content=[TextBlock(text=prompt), image],
+                )],
+                max_tokens=_VISION_FALLBACK_MAX_TOKENS,
+                temperature=0.0,
+            ))
+            text = (resp.text or "").strip()
+        except Exception:
+            log.exception("vision fallback: image %d description failed", idx)
+            text = ""
+        label = f"Image {idx}" if len(images) > 1 else "Image"
+        parts.append(f"{label}: {text}" if text else f"{label}: (description unavailable)")
+    return "\n\n".join(parts)
+
+
+def _vision_fallback_user_message(user_message: str, description: str) -> str:
+    """Append the auto-description (or a no-vision notice) under a clear
+    marker so both plan and execute inherit it as plain text."""
+    if description.strip():
+        injected = f"{_VISION_FALLBACK_MARKER}\n{description.strip()}"
+    else:
+        injected = "[image attached, but no vision-capable model is configured]"
+    base = user_message.strip()
+    return f"{base}\n\n{injected}" if base else injected
+
+
 async def run_turn(
     *,
     session_id: str,
     user_message: str,
+    images: list[ImageBlock] | None = None,
     options: RunOptions | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run one user turn as an event stream.
 
     Yields AgentEvent frames covering the full plan-execute lifecycle.
     See AgentEvent docstring for event_type semantics.
+
+    `images` (when present) are the CURRENT turn's pasted/dropped images.
+    They ride the live user ChatMessage as ImageBlocks (native vision) and
+    are never persisted as bytes — only an '[image attached]' placeholder is
+    written to history, so later turns never re-pay vision tokens.
     """
-    if not user_message.strip():
+    images = list(images or [])
+    if not user_message.strip() and not images:
         raise AgentTurnError("user_message is empty")
     options = options or RunOptions()
+    settings = get_settings()
+
+    # Decide how pasted images reach the model (settings.chat_vision):
+    #   on   → send directly; off → always describe; auto → probe once + cache.
+    # On the describe path the raw ImageBlocks are dropped and a vision-profile
+    # description is injected as text so both plan and execute inherit it.
+    turn_images = images
+    turn_user_message = user_message
+    if images:
+        mode = settings.chat_vision
+        if mode == "on":
+            send_direct = True
+        elif mode == "off":
+            send_direct = False
+        else:
+            send_direct = await _chat_model_supports_vision()
+        if not send_direct:
+            turn_images = []
+            description = ""
+            if has_vision_profile(settings):
+                description = await _describe_images_via_vision(images, user_message)
+            turn_user_message = _vision_fallback_user_message(user_message, description)
 
     async with session_scope() as db:
         last = await session_service.latest_turn_index(db, session_id)
@@ -393,7 +592,10 @@ async def run_turn(
 
         conv = await session_service.start_conversation(
             db, session_id=session_id, turn_index=turn_index,
-            user_message=user_message,
+            # Persist a text placeholder (never image bytes) so history
+            # replay stays text-only automatically. Count from the original
+            # request even on the vision-fallback path.
+            user_message=_persisted_user_message(user_message, len(images)),
         )
         # Need session.started_at to freeze the journal slice in the
         # snapshot — see stable_context module docstring.
@@ -424,7 +626,8 @@ async def run_turn(
         chat=chat,
         system_prompt=plan_system,
         prefix_messages=snapshot_messages + plan_history,
-        user_message=user_message,
+        user_message=turn_user_message,
+        images=turn_images,
         conversation_id=conversation_id,
         mode=options.mode,
     )
@@ -467,7 +670,8 @@ async def run_turn(
             system_prompt=execute_system,
             prefix_messages=snapshot_messages,
             plan_text=plan_for_execute,
-            user_message=user_message,
+            user_message=turn_user_message,
+            images=turn_images,
             conversation_id=conversation_id,
             session_id=session_id,
             outcome=outcome,
@@ -853,10 +1057,11 @@ async def _run_plan_phase(
     conversation_id: str,
     mode: str = "deep",
     prefix_messages: list[ChatMessage] | None = None,
+    images: list[ImageBlock] | None = None,
 ) -> str:
     started = time.monotonic()
     messages = list(prefix_messages or []) + [
-        ChatMessage(role="user", content=user_message),
+        ChatMessage(role="user", content=_current_user_content(user_message, images)),
     ]
     resp = await chat.complete(ChatRequest(
         system=system_prompt,
@@ -1168,6 +1373,7 @@ async def _run_execute_phase(
     resumed_history: list[ChatMessage] | None = None,
     options: RunOptions | None = None,
     budget_state: _BudgetState | None = None,
+    images: list[ImageBlock] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute loop as event stream.
 
@@ -1200,7 +1406,9 @@ async def _run_execute_phase(
         list(prefix_messages or [])
         + list(resumed_history or [])
         + [
-            ChatMessage(role="user", content=user_message),
+            # ImageBlocks attach ONLY to this current-turn user message.
+            # Prior turns replayed via resumed_history stay text-only.
+            ChatMessage(role="user", content=_current_user_content(user_message, images)),
             ChatMessage(role="assistant", content=(
                 "Plan prepared:\n"
                 + (plan_text or "(no specific plan; answer directly)")

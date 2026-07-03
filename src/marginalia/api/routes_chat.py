@@ -48,6 +48,7 @@ from sse_starlette.sse import EventSourceResponse
 from marginalia.agent.runtime import run_turn
 from marginalia.agent.types import AgentTurnError, ChatMode, RunOptions
 from marginalia.config import get_settings
+from marginalia.llm import ImageBlock
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session, session_scope
 from marginalia.repositories import sessions as session_service
@@ -74,9 +75,82 @@ def _lock_for(session_id: str) -> asyncio.Lock:
     return lock
 
 
+_ALLOWED_IMAGE_MEDIA_TYPES: frozenset[str] = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+
+class ChatImage(BaseModel):
+    # Mirrors marginalia.llm.ImageBlock's wire shape. `data_b64` is the RAW
+    # image bytes base64-encoded, with no "data:" URI prefix. media_type is a
+    # plain str here (not a Literal) so an unsupported value is rejected with
+    # an explicit HTTP 400 in post_chat rather than a generic 422 — matching
+    # the documented wire contract.
+    media_type: str
+    data_b64: str
+
+
 class ChatBody(BaseModel):
     query: str
     mode: ChatMode = "auto"
+    # Images belong to the CURRENT turn only. They are never persisted as
+    # bytes into conversation history and never re-sent on later turns.
+    images: list[ChatImage] = []
+
+
+def _decoded_len(data_b64: str) -> int:
+    """Decoded byte length of a base64 string without allocating the bytes.
+
+    Standard base64 encodes 3 bytes per 4 chars; trailing '=' padding
+    shrinks the final group. This over-estimates by at most 2 bytes, which
+    is fine for a size cap. We ignore embedded whitespace/newlines the way
+    a lenient decoder would, so the cap can't be dodged by padding the
+    payload with newlines.
+    """
+    core = "".join(data_b64.split())
+    padding = core.count("=")
+    return max(0, (len(core) * 3) // 4 - padding)
+
+
+def _validate_chat_images(images: list[ChatImage]) -> list[ImageBlock]:
+    """Enforce per-turn count + per-image decoded-size caps, then convert to
+    the runtime ImageBlock type. Raises HTTPException(413) on over-cap.
+
+    Called eagerly in post_chat before the SSE stream opens so the client
+    gets a real HTTP status instead of an in-stream error frame. media_type
+    is already constrained to the allowed Literal by pydantic, so an invalid
+    type produces a 422 at request parsing (documented as the 400-class
+    rejection in the wire contract).
+    """
+    settings = get_settings()
+    if len(images) > settings.chat_image_max_count:
+        raise HTTPException(status_code=413, detail={
+            "error": "too_many_images",
+            "max_count": settings.chat_image_max_count,
+            "received": len(images),
+        })
+    blocks: list[ImageBlock] = []
+    for idx, img in enumerate(images):
+        if img.media_type not in _ALLOWED_IMAGE_MEDIA_TYPES:
+            raise HTTPException(status_code=400, detail={
+                "error": "unsupported_media_type",
+                "index": idx,
+                "media_type": img.media_type,
+                "allowed": sorted(_ALLOWED_IMAGE_MEDIA_TYPES),
+            })
+        size = _decoded_len(img.data_b64)
+        if size > settings.chat_image_max_bytes:
+            raise HTTPException(status_code=413, detail={
+                "error": "image_too_large",
+                "index": idx,
+                "max_bytes": settings.chat_image_max_bytes,
+                "decoded_bytes": size,
+            })
+        blocks.append(ImageBlock(
+            media_type=img.media_type,  # type: ignore[arg-type]
+            data_b64=img.data_b64,
+        ))
+    return blocks
 
 
 def _timeout_message(timeout_seconds: float) -> str:
@@ -133,6 +207,11 @@ async def post_chat(
         await session_service.reopen_session(db, session_id=session_id)
         await db.commit()
 
+    # Validate + convert images eagerly, before the SSE stream opens, so an
+    # over-cap request fails with a real HTTP status instead of an in-stream
+    # error frame the browser would surface as a "successful" stream.
+    images = _validate_chat_images(body.images)
+
     user_message = body.query
     lock = _lock_for(session_id)
 
@@ -150,6 +229,7 @@ async def post_chat(
                     async for ev in run_turn(
                         session_id=session_id,
                         user_message=user_message,
+                        images=images,
                         options=RunOptions(mode=body.mode),
                     ):
                         if ev.event_type == "conversation" and ev.data:
