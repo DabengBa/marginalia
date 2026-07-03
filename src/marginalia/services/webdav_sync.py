@@ -1290,10 +1290,15 @@ def _merge_snapshot_rows(
         local_rows.get("relations.jsonl", []),
         "relation_id",
     )
+    # A selective publish keeps only relations WHOLLY among the selected
+    # entries — a relation (and its free-text note) between two entries that
+    # merely both happen to exist on the remote must not ride along (二.23).
+    # A full publish keeps relations among any known entry (remote ∪ local).
+    relation_scope = selected_entry_ids if scoped else entry_ids
     relations = [
         row for row in relations
-        if str(row.get("entry_a_id") or "") in entry_ids
-        and str(row.get("entry_b_id") or "") in entry_ids
+        if str(row.get("entry_a_id") or "") in relation_scope
+        and str(row.get("entry_b_id") or "") in relation_scope
     ]
 
     if scoped:

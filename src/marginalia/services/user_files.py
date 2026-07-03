@@ -36,6 +36,7 @@ from marginalia.storage.base import StorageBackend
 SEARCH_LIMIT_DEFAULT = 25
 SEARCH_LIMIT_MAX = 100
 SEARCH_RELATED_TOP_K = 3      # neighbours surfaced per search hit
+SEARCH_RELATED_PREFILL_MAX = 10  # only the top hits get a (costly) neighbour walk
 METADATA_RELATED_TOP_K = 8    # neighbours surfaced on the single-entry page
 
 
@@ -118,8 +119,16 @@ async def search_entries(
     rows = await entries_repo.search_filtered(session, text=terms, limit=limit)
 
     out: list[dict[str, Any]] = []
-    for entry, file_row in rows:
+    for rank, (entry, file_row) in enumerate(rows):
         folder_path = await _build_folder_path(session, entry.folder_id)
+        # The related-entries pre-fill runs a random walk per hit; multi-word
+        # tokenized search (二.9) can return many hits, so only pre-fill
+        # neighbours for the top-ranked few and let the GUI fetch the rest on
+        # demand — search latency no longer scales with match count (二.22).
+        related = (
+            await _related_entries_for(session, entry.id, top_k=SEARCH_RELATED_TOP_K)
+            if rank < SEARCH_RELATED_PREFILL_MAX else []
+        )
         out.append({
             "entry_id": entry.id,
             "display_name": entry.display_name,
@@ -135,9 +144,7 @@ async def search_entries(
             "updated_at": (
                 entry.updated_at.isoformat() if entry.updated_at else None
             ),
-            "related_entries": await _related_entries_for(
-                session, entry.id, top_k=SEARCH_RELATED_TOP_K,
-            ),
+            "related_entries": related,
         })
     return out
 

@@ -35,9 +35,13 @@ log = logging.getLogger(__name__)
 # failures. Kept small so a genuinely-down provider still fails reasonably
 # fast; the SDKs also retry a couple of times internally per attempt, so the
 # effective attempt count is bounded and sane.
-_MAX_RETRY_ATTEMPTS = 3
-_RETRY_BASE_SECONDS = 0.5
+_MAX_RETRY_ATTEMPTS = 4
+_RETRY_BASE_SECONDS = 1.0
 _RETRY_MAX_SECONDS = 20.0
+# A server-supplied Retry-After is provider backpressure — honor it up to a
+# larger ceiling than the exponential-backoff cap (which only bounds our own
+# guess), so a 429 asking for e.g. 45s isn't retried prematurely.
+_RETRY_AFTER_MAX_SECONDS = 60.0
 # HTTP statuses that are safe to retry. 429 is handled via RateLimitError;
 # these are transient server-side failures / overload signals (529 = Anthropic
 # "Overloaded"). 4xx other than 429 (e.g. a 400 BadRequestError) are NOT here.
@@ -93,9 +97,9 @@ def _retry_delay(exc: BaseException, attempt: int) -> float:
     when present, else exponential backoff with jitter — both capped."""
     retry_after = _retry_after_seconds(exc)
     if retry_after is not None:
-        delay = retry_after
-    else:
-        delay = _RETRY_BASE_SECONDS * (2**attempt) + random.uniform(0, _RETRY_BASE_SECONDS)
+        # Honor server backpressure up to a larger ceiling than our own guess.
+        return min(retry_after, _RETRY_AFTER_MAX_SECONDS)
+    delay = _RETRY_BASE_SECONDS * (2**attempt) + random.uniform(0, _RETRY_BASE_SECONDS)
     return min(delay, _RETRY_MAX_SECONDS)
 
 

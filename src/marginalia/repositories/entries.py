@@ -421,7 +421,12 @@ async def search_with_file(
     db: AsyncSession, *, like: str, limit: int,
 ) -> list[tuple[FileEntry, File]]:
     """Free-text search across display_name, file.summary, file.original_ext.
-    Returned rows are joined live-entries + their file rows, ordered by recency."""
+    Returned rows are joined live-entries + their file rows, ordered by recency.
+
+    DEPRECATED / unused: this matches the raw query as one contiguous LIKE
+    substring with recency-only ordering. GUI search (services.user_files) now
+    tokenizes and ranks via `search_filtered` (audit 二.9). Kept only to avoid
+    churn; do not add new callers — use `search_filtered`."""
     stmt = (
         select(FileEntry, File)
         .join(File, File.id == FileEntry.file_id)

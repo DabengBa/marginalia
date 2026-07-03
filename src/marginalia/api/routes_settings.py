@@ -20,6 +20,7 @@ PUT accepts new api_keys but the response strips them again.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -58,6 +59,10 @@ _AUTOHEAL_MAX = 500
 # Provider errors can be long and may embed the base_url; keep the surfaced
 # message short and strip the api_key if it ever appears in the text.
 _MAX_ERROR_CHARS = 400
+
+# Wall-clock bound for a single LLM test probe so a stalling endpoint can't
+# hang POST /settings/llm/test.
+_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 def _mask(secret: str | None) -> str | None:
@@ -216,14 +221,20 @@ async def _probe_llm_profile(profile: str) -> dict[str, Any]:
     api_key = resolve_profile(get_settings(), profile).api_key
     try:
         client = get_chat_client(profile)
-        await client.complete(
-            ChatRequest(
-                system=None,
-                messages=[ChatMessage(role="user", content="ping")],
-                max_tokens=1,
+        # Bound the probe: a mistyped base_url that accepts the TCP connection
+        # but never responds must fail fast, not hang the endpoint.
+        async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
+            await client.complete(
+                ChatRequest(
+                    system=None,
+                    messages=[ChatMessage(role="user", content="ping")],
+                    max_tokens=1,
+                )
             )
-        )
         return {"ok": True, "model": client.model, "provider": client.provider}
+    except TimeoutError:
+        log.warning("llm test timed out for profile %s", profile)
+        return {"ok": False, "error": f"timed out after {_PROBE_TIMEOUT_SECONDS:g}s"}
     except Exception as exc:  # noqa: BLE001 - reported per-profile, logged here
         log.warning("llm test failed for profile %s: %s", profile, exc)
         return {"ok": False, "error": _safe_error(exc, api_key)}

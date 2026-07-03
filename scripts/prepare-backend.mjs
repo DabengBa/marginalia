@@ -112,6 +112,16 @@ const installMarginaliaInto = (runtimeRoot) => {
   // file is written to the runtime's parent dir so it is NOT copied into the
   // bundle by copyRuntimeToBundleResources.
   const reqPath = path.join(path.dirname(runtimeRoot), 'marginalia-requirements.txt');
+  // uv is required to export the locked requirements. Fail with an actionable
+  // message instead of a raw ENOENT stack if it isn't installed.
+  const uvCheck = spawnSync('uv', ['--version'], { stdio: 'ignore' });
+  if (uvCheck.error || uvCheck.status !== 0) {
+    throw new Error(
+      "[prepare-backend] 'uv' is required to build the backend sidecar " +
+      '(used to export the locked requirements from uv.lock). Install it: ' +
+      'https://docs.astral.sh/uv/getting-started/installation/',
+    );
+  }
   runChecked('uv', [
     'export', '--locked', '--no-dev', '--no-emit-project', '--no-hashes',
     '-o', reqPath,

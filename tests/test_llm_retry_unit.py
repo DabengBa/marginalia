@@ -25,6 +25,9 @@ def _fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     hermetic (the token bucket carries process-global state otherwise)."""
     monkeypatch.setattr(factory, "_RETRY_BASE_SECONDS", 0.0)
     monkeypatch.setattr(factory, "_RETRY_MAX_SECONDS", 0.0)
+    # Retry-After is capped separately now; zero it too so a loop test with a
+    # Retry-After header doesn't actually sleep.
+    monkeypatch.setattr(factory, "_RETRY_AFTER_MAX_SECONDS", 0.0)
 
     async def _noop_slot(**_kwargs: object) -> None:
         return None
@@ -157,12 +160,17 @@ async def test_connection_timeout_is_retried() -> None:
     assert inner.calls == 2
 
 
-def test_retry_after_header_is_honored() -> None:
-    """A numeric Retry-After drives the delay (verified without sleeping)."""
+def test_retry_after_header_is_honored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A numeric Retry-After drives the delay, honored up to its own (larger)
+    ceiling rather than the exponential-backoff cap."""
+    monkeypatch.setattr(factory, "_RETRY_AFTER_MAX_SECONDS", 30.0)
     exc = _rate_limit(headers={"retry-after": "7"})
     assert factory._retry_after_seconds(exc) == 7.0
-    # _retry_delay prefers Retry-After over exponential backoff.
-    assert factory._retry_delay(exc, attempt=0) == min(7.0, factory._RETRY_MAX_SECONDS)
+    # Retry-After (7s) is preferred over backoff and honored below the ceiling.
+    assert factory._retry_delay(exc, attempt=0) == 7.0
+    # An excessive Retry-After is capped at the Retry-After ceiling.
+    big = _rate_limit(headers={"retry-after": "9999"})
+    assert factory._retry_delay(big, attempt=0) == 30.0
 
 
 def test_no_retry_after_header_returns_none() -> None:

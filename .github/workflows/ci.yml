@@ -142,8 +142,10 @@ jobs:
 
       # Build (no push) with the same mirror overrides release.yml uses so the
       # GitHub runner (outside mainland China) doesn't route through the tuna
-      # mirror. Proves the locked Dockerfile still builds on every PR; the GHA
-      # layer cache keeps subsequent runs fast.
+      # mirror. This validates the linux/amd64 build only (load: true implies a
+      # single arch); the release builds linux/amd64,linux/arm64, so an
+      # arm64-only regression (e.g. a pinned dep with no aarch64 wheel) still
+      # surfaces at release time, not here. The GHA layer cache keeps runs fast.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
