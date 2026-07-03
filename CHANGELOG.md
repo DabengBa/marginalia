@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+## 0.3.3 - 2026-07-03
+
+### Added
+
+- Multimodal chat input: paste or drag images into the chat composer to ask
+  about your library together with a picture. Images ride the current turn
+  only (never re-sent in history, so token cost stays flat) and render in the
+  transcript. `MARGINALIA_CHAT_VISION` (auto|on|off, default auto) probes the
+  chat model once per model and, for a text-only model, routes images through
+  the `vision` profile as an injected description — automating the manual
+  "describe the image first" workaround. Per-turn caps via
+  `MARGINALIA_CHAT_IMAGE_MAX_COUNT` / `MARGINALIA_CHAT_IMAGE_MAX_BYTES`.
+- `POST /v1/settings/llm/test` probes each configured LLM profile with a tiny
+  chat call (bounded by a timeout) so a mistyped key/base-URL/model is caught
+  at config time; a "Test connection" button surfaces per-profile status. A
+  settings PUT that first makes required profiles valid now auto-reprocesses
+  ingests that failed before a key existed.
+- `OCR_MAX_PAGES` (default 300) caps scanned-PDF OCR and records an
+  `ocr_page_cap` partial-coverage reason when it trips.
+
+### Changed
+
+- Transient provider failures (rate limits, 5xx/529 overload, timeouts) are
+  retried with bounded exponential backoff honoring `Retry-After`, so a brief
+  overload no longer discards a whole agent turn's accumulated tool work.
+- CPU-bound document parsing (PDF/DOCX/PPTX/spreadsheet) runs off the event
+  loop, keeping the API responsive and worker heartbeats alive during large
+  ingests.
+- GUI search tokenizes multi-word queries and ranks results instead of
+  matching one contiguous phrase; the per-hit related-entries walk is limited
+  to the top hits so latency no longer scales with match count.
+- Release artifacts (Docker image, desktop sidecar) install from the locked
+  requirements exported from `uv.lock`, so shipped versions match what CI
+  tested; CI gained a `uv.lock` drift gate and a Docker build check.
+
+### Fixed
+
+- Selective WebDAV publish no longer leaks the full folder/tag taxonomy or any
+  sessions/conversations/journals — only the taxonomy and relations reachable
+  from the selected entries ride along.
+
 ## 0.3.2 - 2026-07-03
 
 Hardening release from a full code audit: fixes for data-loss, correctness,
