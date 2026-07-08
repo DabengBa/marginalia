@@ -7,8 +7,8 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
   2. Plan phase: yield "planning", do ONE LLM call with `tools=[]`,
      yield "plan" with the user-visible plan text. Stored in
      conversations.llm_calls under phase='plan'. If plan_text starts with
-     `NO_PLAN:` the trailing answer is treated as the final answer and
-     execute is skipped.
+     `NO_PLAN:` the trailing answer is treated as the final answer unless the
+     current user turn visibly requires Marginalia's local tools.
   3. Execute phase: up to `settings.agent_execute_max_turns` (default 15)
      LLM calls. For each:
          - yield "thinking", LLM call (records usage)
@@ -27,7 +27,9 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
 
 Guards (added 2026-05-24, all append-only — never mutate prior messages
 so ephemeral cache breakpoints stay valid):
-  - NO_PLAN fast-path: planner can opt out of execute for trivial turns.
+  - NO_PLAN fast-path: planner can opt out of execute for trivial turns; the
+    runtime repairs that decision when the current turn visibly needs local
+    Marginalia tools.
   - Tool-call dedup: identical (name, args) within one turn returns the
     prior result synthetically without re-dispatching.
   - Doom-loop guard: if the same (name, args) appears K times in the last
@@ -69,7 +71,7 @@ from marginalia.citations import (
     parse_citation_footnote_match,
     unescape_citation_quote,
 )
-from marginalia.db.models import Session as SessionRow
+from marginalia.db.models import Conversation as ConversationRow, Session as SessionRow
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
@@ -154,6 +156,135 @@ QUICK_FORCED_ANSWER_NUDGE = (
     "bounded answer. Use the same language as the user's latest message unless "
     "they explicitly asked otherwise."
 )
+PREMATURE_NO_TOOL_NUDGE = (
+    "[runtime guard] Your previous response ended without using Marginalia "
+    "tools, but the user's request appears to ask about local files, notes, "
+    "documents, or knowledge-base contents. Do not answer from memory. Use "
+    "Marginalia retrieval/read tools first, then answer from the collected "
+    "evidence. If no relevant local evidence exists after searching, say that "
+    "clearly."
+)
+
+_KB_TOOL_HINT_RE = re.compile(
+    r"\b("
+    r"file|files|document|documents|doc|docs|pdf|note|notes|entry|entries|"
+    r"folder|folders|catalog|catalogs|tag|tags|journal|journals|library|"
+    r"knowledge[- ]base|uploaded|stored|citation|citations|quote|quotes"
+    r")\b",
+    re.IGNORECASE,
+)
+_KB_TOOL_HINT_CJK = (
+    "文件",
+    "文档",
+    "资料",
+    "笔记",
+    "条目",
+    "目录",
+    "标签",
+    "知识库",
+    "库里",
+    "上传",
+    "材料",
+    "引用",
+    "证据",
+    "来源",
+)
+_KB_LOCAL_REF_CJK = (
+    "这篇",
+    "这份",
+    "这段",
+)
+_KB_LOCAL_ACTION_CJK = (
+    "总结",
+    "概括",
+    "分析",
+    "阅读",
+    "看看",
+    "看一下",
+    "提炼",
+    "引用",
+    "证据",
+    "来源",
+    "内容",
+    "里面",
+    "讲什么",
+)
+
+
+def _requires_marginalia_tools(user_message: str) -> bool:
+    """Heuristic for post-hoc repair when a model skips tools too early.
+
+    The planner is allowed to route weather/small-talk/general out-of-scope
+    turns to direct answers. This guard is deliberately narrower: it only
+    repairs no-tool execute answers for requests that visibly point at the
+    local Marginalia library.
+    """
+    text = user_message or ""
+    if _KB_TOOL_HINT_RE.search(text):
+        return True
+    if any(term in text for term in _KB_TOOL_HINT_CJK):
+        return True
+    return (
+        any(ref in text for ref in _KB_LOCAL_REF_CJK)
+        and any(action in text for action in _KB_LOCAL_ACTION_CJK)
+    )
+
+
+def _no_plan_repair_plan(user_message: str, *, mode: str) -> str:
+    """Fallback plan when the planner incorrectly emits NO_PLAN for local data.
+
+    Ambiguous local references should still go through execute: the executor can
+    inspect likely local context and ask a focused clarification if it cannot
+    identify the target material.
+    """
+    tier = "deep" if mode == "deep" else "quick"
+    if _prefers_zh(user_message):
+        return (
+            f"BUDGET: {tier}\n"
+            "1. 定位用户问题指向的本地资料、笔记或知识库内容。\n"
+            "2. 读取关键证据；如果仍无法确定目标材料，给出明确的澄清问题。"
+        )
+    return (
+        f"BUDGET: {tier}\n"
+        "1. Identify the local files, notes, or knowledge-base material the "
+        "user's turn points to.\n"
+        "2. Read the key evidence; if the target remains ambiguous, ask a "
+        "focused clarification question."
+    )
+
+
+async def _record_no_plan_repair(
+    conversation_id: str,
+    *,
+    repaired_plan_text: str,
+    raw_no_plan_answer: str,
+) -> None:
+    """Replace the persisted public plan after a planner NO_PLAN repair."""
+    try:
+        async with session_scope() as db:
+            conv = await db.get(ConversationRow, conversation_id)
+            if conv is None:
+                return
+            calls = list(conv.llm_calls or [])
+            for idx, call in enumerate(calls):
+                if not isinstance(call, dict) or call.get("phase") != "plan":
+                    continue
+                updated = dict(call)
+                raw_plan = updated.get("plan_text")
+                if isinstance(raw_plan, str) and raw_plan.strip():
+                    updated["raw_plan_text"] = raw_plan
+                updated["plan_text"] = repaired_plan_text
+                updated["no_plan_repaired"] = True
+                updated["raw_no_plan_answer"] = raw_no_plan_answer
+                calls[idx] = updated
+                conv.llm_calls = calls
+                await db.commit()
+                return
+    except Exception:
+        log.exception(
+            "failed to record planner NO_PLAN repair for conversation %s",
+            conversation_id,
+        )
 
 
 def _canonical_args(arguments: Any) -> str:
@@ -666,11 +797,28 @@ async def run_turn(
     if session_name:
         await _store_session_name(session_id, session_name)
     plan_without_session = _strip_session_name_line(plan_text)
+    plan_for_execute = _strip_budget_line(plan_without_session)
+    planner_no_plan_answer = _extract_no_plan_answer(plan_for_execute)
+    no_plan_repaired = False
+    if (
+        planner_no_plan_answer is not None
+        and _requires_marginalia_tools(turn_user_message)
+    ):
+        no_plan_repaired = True
+        plan_without_session = _no_plan_repair_plan(
+            turn_user_message,
+            mode=options.mode,
+        )
+        plan_for_execute = _strip_budget_line(plan_without_session)
+        await _record_no_plan_repair(
+            conversation_id,
+            repaired_plan_text=plan_without_session,
+            raw_no_plan_answer=planner_no_plan_answer,
+        )
     budget_state = _budget_state_for_plan(
         mode=options.mode,
         plan_text=plan_without_session,
     )
-    plan_for_execute = _strip_budget_line(plan_without_session)
     public_plan_text = _public_plan_text(plan_for_execute)
     yield AgentEvent(
         event_type="plan",
@@ -678,7 +826,9 @@ async def run_turn(
     )
 
     outcome = _ExecuteOutcome()
-    no_plan_answer = _extract_no_plan_answer(plan_for_execute)
+    no_plan_answer = (
+        None if no_plan_repaired else _extract_no_plan_answer(plan_for_execute)
+    )
     if no_plan_answer is not None:
         # Planner declared the user's turn is trivial — skip execute,
         # still emit one fake "thinking" so the SSE stream shape stays
@@ -1465,6 +1615,8 @@ async def _run_execute_phase(
     quick_forced_answer_retries = 0
     quick_forced_answer_active = False
     budget_upgrade_notice: dict[str, Any] | None = None
+    tool_calls_seen = False
+    no_tool_repair_used = False
 
     for turn in range(max_total_turns):
         max_execute_turns = budget_state.limit
@@ -1602,6 +1754,7 @@ async def _run_execute_phase(
             return
 
         if resp.tool_calls and not tools_disabled:
+            tool_calls_seen = True
             assistant_blocks: list = []
             if resp.text:
                 assistant_blocks.append(TextBlock(text=resp.text))
@@ -1721,6 +1874,19 @@ async def _run_execute_phase(
                 )
                 yield AgentEvent(event_type="error", data=outcome.error)
                 return
+            if (
+                not tools_disabled
+                and not tool_calls_seen
+                and not no_tool_repair_used
+                and _requires_marginalia_tools(user_message)
+            ):
+                no_tool_repair_used = True
+                messages.append(ChatMessage(role="assistant", content=raw_answer))
+                messages.append(ChatMessage(
+                    role="user",
+                    content=PREMATURE_NO_TOOL_NUDGE,
+                ))
+                continue
             answer = _strip_leaked_no_plan(raw_answer)
             outcome.answer = answer
             yield AgentEvent(

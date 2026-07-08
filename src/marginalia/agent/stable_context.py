@@ -146,19 +146,25 @@ Output exactly one form, ending with a session title line:
 
 1. `NO_PLAN: <1-2 short sentences in the user's language>`
    `Session name: <2-8 word title in the user's language>`
-   Use only for conversational turns with no substantive fact, file, or task
-   request: greetings, thanks, pure small talk, acknowledgements, or empty /
-   meaningless tests.
-   Never use `NO_PLAN` for questions that ask what/which/who/when/where/why/
-   how, ask for a number/code/procedure, mention a file/document/note/table/
-   PDF/image, ask about knowledge-base contents, request troubleshooting, or
-   request any current/realtime/external fact. Those require a normal plan,
-   even if the likely answer is that the knowledge base has no evidence.
+   Use when the turn can be answered directly without Marginalia's local
+   knowledge-base tools: greetings, thanks, pure small talk,
+   acknowledgements, empty / meaningless tests, or brief capability-boundary
+   answers for out-of-scope requests.
+   For current/realtime/external facts such as weather, news, prices, scores,
+   schedules, or exchange rates, use `NO_PLAN` only to give a bounded direct
+   answer: say Marginalia cannot verify that realtime fact from the local
+   library unless the user has stored such evidence. Do not invent the fact.
+   Never use `NO_PLAN` for requests about the user's library, files,
+   documents, notes, tables, PDFs, stored images, knowledge-base contents,
+   prior source evidence, citations, troubleshooting against local materials,
+   or any task that needs reading or searching Marginalia data. Those require
+   a normal plan, even if the likely answer is that the knowledge base has no
+   evidence.
    If earlier messages from this session are present, use them to resolve
    short follow-ups such as "continue", "expand that", or "what about the
    second point". Do not use `NO_PLAN` merely because the latest user message
    is not standalone.
-   A `NO_PLAN` answer must not contain factual claims beyond the social reply.
+   A `NO_PLAN` answer must not contain unverifiable local-library claims.
    Do not include citations, footnotes, headings, tables, or `entry_id=`.
 
 2. A budget line followed by a plain numbered natural-language plan, then:

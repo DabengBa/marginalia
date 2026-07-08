@@ -195,15 +195,145 @@ async def test_no_plan_fast_path() -> None:
     print("[1] NO_PLAN fast-path: 1 LLM call, no execute")
 
 
+async def test_no_plan_local_query_is_repaired_before_execute() -> None:
+    sid = await _open_session("doc summary")
+    tool = _CountingTool()
+    _install_tool(tool)
+    chat = _ScriptedChat([
+        ChatResponse(
+            text=(
+                "NO_PLAN: I cannot inspect that document here.\n"
+                "Session name: Doc summary"
+            ),
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=400, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[ToolCall(
+                id="c1", name=tool.name, arguments={"q": "current document"},
+            )],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=500, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Answer from the local document.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=600, output_tokens=20),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    events = await _drive(sid, "总结这份文档")
+    seq = [e[0] for e in events]
+    assert seq.count("thinking") == 2, seq
+    assert seq.count("tool_call") == 1, seq
+    plan_payload = json.loads(next(d for ev, d in events if ev == "plan"))
+    assert not plan_payload["text"].lstrip().startswith("NO_PLAN:"), plan_payload
+    assert plan_payload["budget"]["tier"] == "quick", plan_payload
+    answer = next(d for ev, d in events if ev == "answer")
+    assert "local document" in answer
+    assert tool.call_count == 1
+    assert len(chat.requests) == 3, len(chat.requests)
+
+    factory = get_session_factory()
+    async with factory() as s:
+        conv = (
+            await s.execute(select(Conversation).where(Conversation.session_id == sid))
+        ).scalar_one()
+        stored_call = conv.llm_calls[0]
+        stored_plan = _stored_plan_text(conv)
+        assert stored_plan.startswith("BUDGET: quick"), stored_plan
+        assert "NO_PLAN:" not in stored_plan
+        assert stored_call["no_plan_repaired"] is True
+        assert "NO_PLAN:" in stored_call["raw_plan_text"]
+    print("[1a] local-query NO_PLAN repaired before execute")
+
+
 # ---- 2. tool dedup ---------------------------------------------------------
 
 
 def test_no_plan_prompt_excludes_factual_questions() -> None:
-    assert "Use only for conversational turns" in PLAN_PHASE_PROMPT
-    assert "Never use `NO_PLAN` for questions" in PLAN_PHASE_PROMPT
-    assert "ask for a number/code/procedure" in PLAN_PHASE_PROMPT
-    assert "mention a file/document/note/table/" in PLAN_PHASE_PROMPT
-    assert "current/realtime/external fact" in PLAN_PHASE_PROMPT
+    assert (
+        "answered directly without Marginalia's local" in PLAN_PHASE_PROMPT
+    )
+    assert "weather, news, prices" in PLAN_PHASE_PROMPT
+    assert "Do not invent the fact" in PLAN_PHASE_PROMPT
+    assert "Never use `NO_PLAN` for requests about the user's library" in (
+        PLAN_PHASE_PROMPT
+    )
+    assert "knowledge-base contents" in PLAN_PHASE_PROMPT
+
+
+def test_marginalia_tool_requirement_heuristic() -> None:
+    assert runtime._requires_marginalia_tools("summarize this PDF")
+    assert runtime._requires_marginalia_tools("总结这份文档")
+    assert runtime._requires_marginalia_tools("总结这篇")
+    assert runtime._requires_marginalia_tools("我的知识库里有 Raft 笔记吗")
+    assert not runtime._requires_marginalia_tools("这份怎么样")
+    assert not runtime._requires_marginalia_tools("今天天气怎么样")
+    assert not runtime._requires_marginalia_tools("谢谢")
+
+
+async def test_execute_repairs_premature_no_tool_answer_for_library_query() -> None:
+    sid = await _open_session("local note")
+    tool = _CountingTool()
+    _install_tool(tool)
+    chat = _ScriptedChat([
+        ChatResponse(
+            text=(
+                "BUDGET: quick\n"
+                "1. Locate the relevant local note.\n"
+                "2. Verify the answer from local evidence.\n"
+                "Session name: Local note"
+            ),
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=400, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Raft is a consensus algorithm.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=500, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[ToolCall(
+                id="c1", name=tool.name, arguments={"q": "raft note"},
+            )],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=600, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Answer from local evidence.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=700, output_tokens=20),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    events = await _drive(sid, "summarize my raft note")
+    seq = [e[0] for e in events]
+    assert seq.count("thinking") == 3, seq
+    assert seq.count("tool_call") == 1, seq
+    assert seq.count("tool_result") == 1, seq
+    answer = next(d for ev, d in events if ev == "answer")
+    assert "Answer from local evidence" in answer
+    assert tool.call_count == 1
+    assert len(chat.requests) == 4, len(chat.requests)
+    repair_req = chat.requests[2]
+    assert any(
+        "previous response ended without using Marginalia tools"
+        in str(message.content)
+        for message in repair_req.messages
+    )
+    print("[1b] no-tool local-library answer repaired into agent loop")
 
 
 async def test_tool_dedup() -> None:
@@ -421,7 +551,11 @@ async def main() -> None:
     await _create_schema()
     test_canonical_args()
     test_public_plan_text_strips_numbering()
+    test_no_plan_prompt_excludes_factual_questions()
+    test_marginalia_tool_requirement_heuristic()
     await test_no_plan_fast_path()
+    await test_no_plan_local_query_is_repaired_before_execute()
+    await test_execute_repairs_premature_no_tool_answer_for_library_query()
     await test_tool_dedup()
     await test_doom_loop_nudge()
     await test_final_answer_continuation_is_buffered()
