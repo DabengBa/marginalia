@@ -10,9 +10,11 @@ then resolves entry_id to the live `File` row and lets the file's actual
 type pick the locator:
 
   - PDF (`mime_type == "application/pdf"` or `original_ext == "pdf"`):
-    `?page=N`, preferably by locating the quote in extracted text and
-    using that physical page; fallback to page if quote lookup misses.
-  - text-shaped (`kind in {text, code, log, docx}` or text/code/docx ext):
+    `?page=N&q=...` when the quote is verified on that physical page;
+    fallback to page alone if quote lookup misses.
+  - Office files: combine their native anchor (`block`, `page`, or
+    `sheet+cell/row`) with the verified quote.
+  - text-shaped (`kind in {text, code, log}` or text/code ext):
     `?q=<urlencoded quote>` if quote present, bare otherwise.
   - everything else (image, table, audio, ...): bare link.
 
@@ -382,7 +384,7 @@ async def _check_rewrite():
             out = await rt._rewrite_footnotes_for_display(
                 f'body[^a]\n\n[^a]: entry_id={eid}, quote="printed page one", page=1 - r',
             )
-            assert f"[my-doc.md](entry:{eid}?page=6)" in out, out
+            assert f"[my-doc.md](entry:{eid}?page=6&q=printed+page+one)" in out, out
             assert "?page=1" not in out
 
         # 11b. Replay can choose the cheap path: use the stored page
@@ -453,13 +455,12 @@ async def _check_rewrite():
         assert f"[my-doc.md](entry:{eid})" in out, out
         assert "?q=" not in out and "?page=" not in out
 
-        # 17. table kind (xlsx): no in-page search, bare link.
+        # 17. XLSX quote fallback is retained when exact source reads fail.
         set_file(mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", original_ext="xlsx", kind="table")
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc" - r',
         )
-        assert f"[my-doc.md](entry:{eid})" in out, out
-        assert "?q=" not in out
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
 
         # 18. code kind: in-page text search works, ?q= emitted.
         set_file(mime_type="text/x-python", original_ext="py", kind="code")
@@ -507,19 +508,17 @@ async def _check_rewrite():
         )
         assert f"[my-doc.md](entry:{eid}?page=2)" in out, out
 
-        # 23. pptx with quote + page still uses the numeric slide locator;
-        # quote search is only a fallback when the page/slide is absent.
+        # 23. PPTX preserves both the numeric slide locator and quote.
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="slide bullet", page=6 - r',
         )
-        assert f"[my-doc.md](entry:{eid}?page=6)" in out, out
-        assert "?q=" not in out, out
+        assert f"[my-doc.md](entry:{eid}?page=6&q=slide+bullet)" in out, out
 
         # 24. Legacy slide= is accepted but normalized to ?page=N.
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="slide bullet", slide=8 - r',
         )
-        assert f"[my-doc.md](entry:{eid}?page=8)" in out, out
+        assert f"[my-doc.md](entry:{eid}?page=8&q=slide+bullet)" in out, out
         assert "slide=" not in out, out
 
     print("[3] _rewrite_footnotes_for_display: type-aware dispatcher routes quote/page/bare correctly")

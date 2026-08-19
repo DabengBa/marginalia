@@ -1,28 +1,36 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from marginalia.db.bootstrap import bootstrap_schema_sync
 from marginalia.db.models import File, FileEntry
+from marginalia.db.models.tasks import Task
 from marginalia.config import Settings
 from marginalia.semantic.embeddings import EmbeddingConfigError, get_embedding_client
 from marginalia.semantic.embeddings import EmbeddingResult
 from marginalia.semantic.index import (
     SQLITE_VEC_INDEX_FILENAME,
+    best_semantic_sections,
     build_semantic_index,
     refresh_semantic_index_for_file,
     search_semantic_index,
     search_semantic_index_many,
+    semantic_entry_rows,
     semantic_index_dir,
+    semantic_index_status,
     sqlite_vec_available,
 )
+from marginalia.agent.tools.recall_knowledge import load_rerank_documents_by_entry_id
 from marginalia.semantic.rerank import _parse_rerank_hits
 from marginalia.utils.ids import new_id
+from marginalia.tasks.kinds import KIND_REBUILD_SEMANTIC_INDEX
 
 
 @dataclass
@@ -31,13 +39,26 @@ class _FakeEmbeddingClient:
         vectors = []
         for text in texts:
             haystack = text.casefold()
-            if "raft" in haystack or "leader" in haystack:
-                vectors.append([1.0, 0.0, 0.0])
-            elif "cooking" in haystack or "sourdough" in haystack:
+            if "rollback" in haystack and "name:" not in haystack:
+                vectors.append([0.0, 0.0, 1.0])
+            elif (
+                "cooking" in haystack or "sourdough" in haystack
+            ) and ("name:" not in haystack or "raft" not in haystack):
                 vectors.append([0.0, 1.0, 0.0])
+            elif "raft" in haystack or "leader" in haystack:
+                vectors.append([1.0, 0.0, 0.0])
             else:
                 vectors.append([0.0, 0.0, 1.0])
         return EmbeddingResult(vectors=vectors, total_tokens=len(texts))
+
+
+@dataclass
+class _RejectEmbeddingClient:
+    calls: int = 0
+
+    async def embed(self, texts: list[str], *, text_type: str) -> EmbeddingResult:
+        self.calls += 1
+        raise AssertionError(f"embedding provider should not be called for {texts!r}")
 
 
 def _now() -> datetime:
@@ -135,9 +156,9 @@ async def test_semantic_index_builds_and_searches(
         async with factory() as session:
             result = await build_semantic_index(
                 session,
-                entry_ids=[raft_entry_id, cooking_entry_id],
                 client=_FakeEmbeddingClient(),
                 progress_every=0,
+                page_size=1,
             )
 
         assert result.entries_indexed == 2
@@ -162,6 +183,157 @@ async def test_semantic_index_builds_and_searches(
             [raft_entry_id],
             [cooking_entry_id],
         ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_section_vectors_preserve_match_for_recall_rerank_and_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARGINALIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SEMANTIC_RECALL_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "3")
+    monkeypatch.setenv("SEMANTIC_INDEX_BACKEND", "file")
+    from marginalia.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sections.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = _now()
+    file_id = new_id()
+    entry_id = new_id()
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(bootstrap_schema_sync)
+        async with factory() as session:
+            session.add(File(
+                id=file_id,
+                storage_key="00/aa/handbook",
+                sha256="c" * 64,
+                size_bytes=10,
+                mime_type="text/plain",
+                original_ext=".txt",
+                kind="text",
+                summary="Raft operations handbook.",
+                description={"sections": [
+                    {
+                        "id": "election",
+                        "title": "Leader Election",
+                        "summary": "Raft leader selection.",
+                    },
+                    {
+                        "id": "rollback",
+                        "title": "Rollback Procedure",
+                        "summary": "Rollback uses a verified snapshot.",
+                    },
+                    {
+                        "id": "placeholder",
+                        "title": "Section 3",
+                        "summary": "Automatically generated rollback slice.",
+                    },
+                ]},
+                extra="",
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(FileEntry(
+                id=entry_id,
+                folder_id=None,
+                file_id=file_id,
+                display_name="handbook.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            built = await build_semantic_index(
+                session,
+                entry_ids=[entry_id],
+                client=_FakeEmbeddingClient(),
+                progress_every=0,
+            )
+        assert built.entries_indexed == 3
+        manifest_path = semantic_index_dir() / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["documents"] == 1
+        assert manifest["section_entries"] == 2
+
+        hits = await search_semantic_index(
+            "rollback procedure",
+            limit=5,
+            client=_FakeEmbeddingClient(),
+        )
+        assert [(hit.entry_id, hit.section_id) for hit in hits] == [
+            (entry_id, "rollback"),
+        ]
+        section_matches = await best_semantic_sections(
+            "rollback procedure",
+            [entry_id],
+            client=_FakeEmbeddingClient(),
+        )
+        assert section_matches[entry_id][0] == "rollback"
+        assert section_matches[entry_id][1] == pytest.approx(1.0)
+
+        async with factory() as session:
+            rows = await semantic_entry_rows(
+                session,
+                "rollback procedure",
+                limit=5,
+                client=_FakeEmbeddingClient(),
+            )
+            documents = await load_rerank_documents_by_entry_id(
+                session,
+                [entry_id],
+                matched_section_ids={entry_id: "rollback"},
+            )
+        assert rows[0]["matched_section_id"] == "rollback"
+        assert "Rollback Procedure" in documents[entry_id]
+        assert "Leader Election" not in documents[entry_id]
+
+        async with factory() as session:
+            file_row = await session.get(File, file_id)
+            assert file_row is not None
+            file_row.description = {"sections": [{
+                "id": "starter",
+                "title": "Sourdough Starter",
+                "summary": "Cooking notes for a sourdough culture.",
+            }]}
+            file_row.updated_at = _now()
+            await session.commit()
+        async with factory() as session:
+            refreshed = await refresh_semantic_index_for_file(
+                session,
+                file_id,
+                client=_FakeEmbeddingClient(),
+            )
+        assert refreshed.entries_removed == 3
+        assert refreshed.entries_refreshed == 2
+        assert refreshed.entries_total == 2
+        after = await search_semantic_index(
+            "sourdough starter",
+            limit=1,
+            client=_FakeEmbeddingClient(),
+        )
+        assert after[0].section_id == "starter"
+
+        manifest["version"] = 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        status = semantic_index_status()
+        assert status["compatible"] is False
+        assert status["needs_rebuild"] is True
     finally:
         await engine.dispose()
 
@@ -294,6 +466,196 @@ async def test_semantic_index_refresh_updates_reprocessed_file(
             client=_FakeEmbeddingClient(),
         )
         assert [hit.entry_id for hit in after] != [raft_entry_id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_semantic_refresh_reuses_current_vectors_for_deduplicated_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARGINALIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SEMANTIC_RECALL_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "3")
+    monkeypatch.setenv("SEMANTIC_INDEX_BACKEND", "file")
+    from marginalia.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reuse.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = _now()
+    file_id = new_id()
+    original_entry_id = new_id()
+    dedup_entry_id = new_id()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(bootstrap_schema_sync)
+        async with factory() as session:
+            session.add(File(
+                id=file_id,
+                storage_key="00/aa/reuse",
+                sha256="d" * 64,
+                size_bytes=10,
+                mime_type="text/plain",
+                original_ext=".txt",
+                kind="text",
+                summary="Raft consensus uses leader election.",
+                description={"sections": []},
+                extra="",
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(FileEntry(
+                id=original_entry_id,
+                folder_id=None,
+                file_id=file_id,
+                display_name="same-name.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            await build_semantic_index(
+                session,
+                client=_FakeEmbeddingClient(),
+                progress_every=0,
+            )
+
+        async with factory() as session:
+            session.add(FileEntry(
+                id=dedup_entry_id,
+                folder_id=None,
+                file_id=file_id,
+                display_name="same-name.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        reject = _RejectEmbeddingClient()
+        async with factory() as session:
+            result = await refresh_semantic_index_for_file(
+                session,
+                file_id,
+                client=reject,
+            )
+
+        assert reject.calls == 0
+        assert result.entries_removed == 1
+        assert result.entries_refreshed == 2
+        assert result.vectors_reused == 2
+        hits = await search_semantic_index(
+            "leader election",
+            limit=2,
+            client=_FakeEmbeddingClient(),
+        )
+        assert {hit.entry_id for hit in hits} == {
+            original_entry_id,
+            dedup_entry_id,
+        }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "replacement"),
+    [("EMBEDDING_MODEL", "replacement-model"), ("EMBEDDING_DIMENSIONS", "4")],
+)
+async def test_semantic_refresh_enqueues_rebuild_for_incompatible_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    replacement: str,
+) -> None:
+    monkeypatch.setenv("MARGINALIA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SEMANTIC_RECALL_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "3")
+    monkeypatch.setenv("SEMANTIC_INDEX_BACKEND", "file")
+    from marginalia.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'mismatch.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = _now()
+    file_id = new_id()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(bootstrap_schema_sync)
+        async with factory() as session:
+            session.add(File(
+                id=file_id,
+                storage_key="00/aa/mismatch",
+                sha256="e" * 64,
+                size_bytes=10,
+                mime_type="text/plain",
+                original_ext=".txt",
+                kind="text",
+                summary="Raft consensus uses leader election.",
+                description={"sections": []},
+                extra="",
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            session.add(FileEntry(
+                id=new_id(),
+                folder_id=None,
+                file_id=file_id,
+                display_name="mismatch.txt",
+                lifecycle="active",
+                catalog_id=None,
+                extra="",
+                deleted_at=None,
+                purge_after=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+        async with factory() as session:
+            await build_semantic_index(
+                session,
+                client=_FakeEmbeddingClient(),
+                progress_every=0,
+            )
+
+        monkeypatch.setenv(setting, replacement)
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+        reject = _RejectEmbeddingClient()
+        async with factory() as session:
+            result = await refresh_semantic_index_for_file(
+                session,
+                file_id,
+                client=reject,
+            )
+            tasks = (
+                await session.execute(
+                    select(Task).where(Task.kind == KIND_REBUILD_SEMANTIC_INDEX)
+                )
+            ).scalars().all()
+
+        assert reject.calls == 0
+        assert result.skipped_reason == "index_config_mismatch_rebuild_enqueued"
+        assert len(tasks) == 1
     finally:
         await engine.dispose()
 

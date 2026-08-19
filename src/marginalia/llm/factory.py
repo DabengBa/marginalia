@@ -123,6 +123,7 @@ class _UsageRecordingChatClient:
         self.profile_name = inner.profile_name
         self.provider = inner.provider
         self.model = inner.model
+        self.capabilities = profile.capabilities if profile is not None else None
         self._base_url = profile.base_url if profile is not None else getattr(inner, "base_url", None)
         self._tps = profile.tps if profile is not None else 10
         self._disable_thinking_by_default = disable_thinking_by_default

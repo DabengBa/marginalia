@@ -2,6 +2,93 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-08-19
+
+### Changed
+
+- Long text and Office documents now produce stable, named sections; oversized
+  inputs are indexed in bounded concurrent chunks with file-level summaries,
+  coverage metadata, and deterministic heuristic fallbacks.
+- Citation links now retain complete source locators: PDF page plus verified
+  quote, DOCX block plus quote, PPTX slide plus quote, and XLSX sheet plus
+  cell or row plus quote. The desktop viewer preserves and consumes every
+  locator field together.
+- Agent replay now validates stored tool history strictly, keeps provider
+  prompt prefixes append-only, applies per-tool timeouts, canonicalizes tool
+  schemas, and reports cache-eligible hit/reuse metrics in live and replay APIs.
+- Agent tool fan-out now uses a bounded rolling pool, configurable with
+  `AGENT_MAX_PARALLEL_TOOL_CALLS`, so one model response cannot open an
+  unbounded number of database sessions or retain every tool result at once.
+- Scanned-PDF visual question answering caps each read to five pages, sends at
+  most three page images per provider request, enforces serialized payload and
+  render-size budgets, and falls back to single-page calls when a model does
+  not support multiple images.
+- PDF, DOCX, and PPTX question reads now preserve readable source text before
+  considering OCR or document vision. Visual inspection is reserved for
+  requested ranges without readable text, while image reads fall back to their
+  persisted descriptions when a live vision call fails.
+- Embedding and rerank HTTP connections are reused within each event loop.
+  Provider responses are validated for vector count/dimensions and usable
+  rerank results before they enter the semantic index or ranking pipeline.
+- Ingest task outcomes now report extraction, vision, intelligence, embedding,
+  status-persistence, and total-pipeline stage durations. Throughput reporting
+  distinguishes scheduled reprocessing from ordinary uploads without changing
+  the underlying task kind.
+- The provider diagnostics action now sends a real image to the vision profile
+  and validates enabled embedding and rerank providers as well as chat models.
+- Retrieval evaluation now includes a concurrent load runner with throughput,
+  latency percentiles, quality metrics, and enforceable thresholds.
+- Default task-worker and ingest-LLM concurrency are both four, while remaining
+  independently configurable for workload and provider limits.
+- LLM profiles now carry explicit dialect, context-window, tokenizer, vision,
+  tool, temperature, and output-token-parameter capabilities. Token-aware
+  request compaction keeps conversation history within the resolved model
+  window without modifying stored turns.
+- Prompt-cache metrics now include a configurable three-state SLO verdict:
+  met, breached, or insufficient data.
+- Whole-library semantic rebuilds page through database entries, and confident
+  scoped section matches backfill locators for lexical recall candidates.
+- Task deliveries now carry a unique owner token. Heartbeats, completion,
+  retry, and stale-lease recovery use owner-and-lease compare-and-swap checks;
+  loss of ownership cancels the old handler, and periodic ticks use time-slot
+  dedup keys so every completed tick leaves a distinct successor.
+- Worker retries use configurable bounded exponential backoff. Database
+  bootstrap also collapses legacy duplicate active tasks before installing the
+  active-dedup constraint, preserving the most executable delivery.
+- Upload limits are enforced while multipart bytes stream through ASGI, before
+  framework spooling. File bytes are counted exactly, non-file multipart data
+  is bounded separately, and an obviously oversized `Content-Length` is
+  rejected without consuming the body.
+- Upload commit ambiguity is compensated safely: local partial files are
+  removed, bounded S3 multipart writes abort on failure, object deletions are
+  persisted as retryable tasks, and soft-deleted database rows are never
+  reused as live content-addressed uploads.
+- A duplicate upload now resumes failed ingest or schedules a per-file semantic
+  refresh for ready content. Refreshes reuse vectors only when provider,
+  model, dimensions, and section text hash all match the current index.
+- PostgreSQL deployments serialize conflicting tool scopes and concurrent
+  turns for one session with transaction advisory locks, while retaining the
+  lightweight in-process locks used by SQLite.
+- Late-page PDF visual reads render only the requested page range; image size,
+  page count, serialized request size, and multi-image compatibility remain
+  bounded independently.
+
+### Fixed
+
+- Settings connection probes use a small but provider-compatible output
+  budget instead of a one-token cap rejected by some reasoning models.
+- Answer-language instructions now stay anchored to the current user's
+  original question even when retrieved evidence or runtime messages use a
+  different language.
+- Semantic indexing ignores generated placeholder-only section titles while
+  preserving real OCR and text headings.
+- Legacy databases with duplicate active task dedup keys upgrade without
+  manual repair, and configurable retry delays remain capped even after many
+  attempts.
+- PPTX reads no longer discard earlier slide text merely because a later slide
+  is empty, and empty vision-provider responses are surfaced as explicit
+  errors instead of synthetic answer text.
+
 ## 0.3.3 - 2026-07-03
 
 ### Added

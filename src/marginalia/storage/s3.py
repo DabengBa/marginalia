@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import aioboto3
 from botocore.exceptions import ClientError
@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 from marginalia.storage.base import StorageBackend
 
 _CHUNK = 1024 * 256
+_MULTIPART_PART_SIZE = 8 * 1024 * 1024
 
 
 class S3Storage(StorageBackend):
@@ -41,15 +42,95 @@ class S3Storage(StorageBackend):
         display_name: str | None = None,
         folder_path: str | None = None,
     ) -> str:
-        buf = bytearray()
-        async for chunk in stream:
-            buf.extend(chunk)
+        upload_id: str | None = None
+        parts: list[dict[str, object]] = []
+        buffer = bytearray()
         async with self._client() as s3:
-            kwargs: dict[str, object] = {"Bucket": self.bucket, "Key": key, "Body": bytes(buf)}
-            if content_type:
-                kwargs["ContentType"] = content_type
-            await s3.put_object(**kwargs)
+            try:
+                async for chunk in stream:
+                    if not chunk:
+                        continue
+                    buffer.extend(chunk)
+                    if upload_id is None and len(buffer) >= _MULTIPART_PART_SIZE:
+                        create_kwargs: dict[str, object] = {
+                            "Bucket": self.bucket,
+                            "Key": key,
+                        }
+                        if content_type:
+                            create_kwargs["ContentType"] = content_type
+                        created = await s3.create_multipart_upload(**create_kwargs)
+                        upload_id = str(created["UploadId"])
+                    while (
+                        upload_id is not None
+                        and len(buffer) >= _MULTIPART_PART_SIZE
+                    ):
+                        body = bytes(buffer[:_MULTIPART_PART_SIZE])
+                        del buffer[:_MULTIPART_PART_SIZE]
+                        parts.append(await self._upload_part(
+                            s3,
+                            key=key,
+                            upload_id=upload_id,
+                            part_number=len(parts) + 1,
+                            body=body,
+                        ))
+
+                if upload_id is None:
+                    kwargs: dict[str, object] = {
+                        "Bucket": self.bucket,
+                        "Key": key,
+                        "Body": bytes(buffer),
+                    }
+                    if content_type:
+                        kwargs["ContentType"] = content_type
+                    await s3.put_object(**kwargs)
+                    return key
+
+                if buffer:
+                    parts.append(await self._upload_part(
+                        s3,
+                        key=key,
+                        upload_id=upload_id,
+                        part_number=len(parts) + 1,
+                        body=bytes(buffer),
+                    ))
+                await s3.complete_multipart_upload(
+                    Bucket=self.bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": parts},
+                )
+            except BaseException:
+                if upload_id is not None:
+                    try:
+                        await s3.abort_multipart_upload(
+                            Bucket=self.bucket,
+                            Key=key,
+                            UploadId=upload_id,
+                        )
+                    except Exception:
+                        # Preserve the original read/upload failure. Bucket
+                        # lifecycle rules can expire a rare abandoned upload.
+                        pass
+                raise
         return key
+
+    async def _upload_part(
+        self,
+        client: Any,
+        *,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        body: bytes,
+    ) -> dict[str, object]:
+        response = await client.upload_part(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=part_number,
+            Body=body,
+        )
+        return {"ETag": response["ETag"], "PartNumber": part_number}
 
     async def rename(self, old_key: str, new_key: str) -> str:
         # UUID-flat: rename is a no-op. Storage key never changes for

@@ -15,7 +15,7 @@ to trigger registration.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, MutableMapping
+from typing import Any, Awaitable, Callable, Literal, Mapping, MutableMapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,17 @@ class ToolContext:
     session_id: str
     conversation_id: str
     user_message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicy:
+    """Execution, replay, and concurrency policy for one tool."""
+
+    access: Literal["read", "write"] = "read"
+    replay: Literal["safe", "idempotent", "never"] = "safe"
+    confirmation: Literal["never", "write", "always"] = "never"
+    timeout_seconds: float | None = 120.0
+    concurrency: Literal["parallel", "session_serial", "global_serial"] = "parallel"
 
 
 ToolHandler = Callable[
@@ -41,6 +52,7 @@ class ToolRegistration:
     description: str
     input_schema: dict[str, Any]
     handler: ToolHandler
+    policy: ToolPolicy = ToolPolicy()
 
 
 _REGISTRY: MutableMapping[str, ToolRegistration] = {}
@@ -51,6 +63,7 @@ def tool(
     name: str,
     description: str,
     schema: dict[str, Any],
+    policy: ToolPolicy | None = None,
 ) -> Callable[[ToolHandler], ToolHandler]:
     """Register a tool. The handler signature must match ToolHandler."""
     def decorator(fn: ToolHandler) -> ToolHandler:
@@ -61,6 +74,7 @@ def tool(
             description=description,
             input_schema=schema,
             handler=fn,
+            policy=policy or ToolPolicy(),
         )
         return fn
     return decorator
@@ -72,9 +86,22 @@ def get_tool(name: str) -> ToolRegistration | None:
 
 def all_tool_defs() -> list[ToolDef]:
     return [
-        ToolDef(name=r.name, description=r.description, input_schema=r.input_schema)
-        for r in _REGISTRY.values()
+        ToolDef(
+            name=_REGISTRY[name].name,
+            description=_REGISTRY[name].description,
+            input_schema=_canonical_schema(_REGISTRY[name].input_schema),
+        )
+        for name in sorted(_REGISTRY)
     ]
+
+
+def _canonical_schema(value: Any) -> Any:
+    """Stabilize object-key order without changing array semantics."""
+    if isinstance(value, dict):
+        return {key: _canonical_schema(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical_schema(item) for item in value]
+    return value
 
 
 def registered_tools() -> list[str]:

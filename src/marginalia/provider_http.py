@@ -8,6 +8,10 @@ import httpx
 _MAX_PROVIDER_ERROR_CHARS = 2000
 
 
+class ProviderHTTPError(RuntimeError):
+    """An upstream provider returned a non-success HTTP response."""
+
+
 def raise_for_provider_status(response: httpx.Response, operation: str) -> None:
     try:
         response.raise_for_status()
@@ -18,7 +22,7 @@ def raise_for_provider_status(response: httpx.Response, operation: str) -> None:
         message = f"{operation} provider error {status} {reason}"
         if detail:
             message = f"{message}: {detail}"
-        raise RuntimeError(message) from exc
+        raise ProviderHTTPError(message) from exc
 
 
 def _response_error_detail(response: httpx.Response) -> str:

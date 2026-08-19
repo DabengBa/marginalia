@@ -56,6 +56,11 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
 
 from marginalia.agent.compression_adapter import maybe_compress_tool_result_for_model
+from marginalia.agent.cache_metrics import summarize_llm_calls
+from marginalia.agent.conversation_compaction import (
+    TokenCounter,
+    fit_messages_to_token_budget,
+)
 from marginalia.agent.stable_context import (
     build_plan_history_messages,
     build_resumed_messages,
@@ -63,12 +68,15 @@ from marginalia.agent.stable_context import (
     build_snapshot_messages,
     render_phase_system_prompt,
 )
+from marginalia.agent.tool_scheduler import ScheduledTool, schedule_waves
+from marginalia.agent.tool_locks import tool_execution_lock
 from marginalia.agent.tools import ToolContext, all_tool_defs, get_tool
 from marginalia.agent.types import AgentEvent, AgentTurnError, RunOptions, TurnUsage
 from marginalia.citations import (
     CITATION_FOOTNOTE_RE,
     CitationFootnote,
     parse_citation_footnote_match,
+    quote_matches_source_text,
     unescape_citation_quote,
 )
 from marginalia.db.models import Conversation as ConversationRow, Session as SessionRow
@@ -81,6 +89,7 @@ from marginalia.llm import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    PromptPrefixTracker,
     get_chat_client,
 )
 from marginalia.config import get_settings, has_vision_profile
@@ -144,7 +153,7 @@ FINAL_ANSWER_CONTINUE_NUDGE = (
     "[runtime guard] Your previous final answer was cut off by the token "
     "limit. Continue exactly where it stopped. Do not restart, do not repeat "
     "previous text, do not call tools, and finish the answer in the same "
-    "language as the user's latest message unless they explicitly asked "
+    "language as the user's latest original question unless they explicitly asked "
     "otherwise."
 )
 QUICK_FORCED_ANSWER_NUDGE = (
@@ -153,8 +162,8 @@ QUICK_FORCED_ANSWER_NUDGE = (
     "Do not call tools. Do not emit DSML, XML, JSON, or pseudo function-call "
     "markup. Write the final answer now from the evidence already collected. "
     "If evidence is incomplete, state the missing piece and give the best "
-    "bounded answer. Use the same language as the user's latest message unless "
-    "they explicitly asked otherwise."
+    "bounded answer. Use the same language as the user's latest original "
+    "question unless they explicitly asked otherwise."
 )
 PREMATURE_NO_TOOL_NUDGE = (
     "[runtime guard] Your previous response ended without using Marginalia "
@@ -556,6 +565,9 @@ async def _chat_model_supports_vision() -> bool:
     from anthropic import BadRequestError as _AnthropicBadRequest
 
     client = get_chat_client("chat")
+    capabilities = getattr(client, "capabilities", None)
+    if capabilities is not None:
+        return bool(capabilities.supports_vision)
     key = (getattr(client, "provider", "?"), getattr(client, "model", "?"))
     cached = _vision_capability.get(key)
     if cached is not None:
@@ -843,9 +855,59 @@ async def run_turn(
         # tape so it sees the full session arc, not just the current
         # question. The planner already saw a lighter transcript to
         # resolve terse follow-ups without carrying full tool results.
-        resumed_history = await build_resumed_messages(
-            session_id, current_conversation_id=conversation_id,
-        )
+        settings = get_settings()
+        capabilities = getattr(chat, "capabilities", None)
+        history_token_budget: int | None = None
+        history_tokenizer = "utf8_upper_bound"
+        if capabilities is not None:
+            history_counter = TokenCounter(capabilities.tokenizer)
+            history_tokenizer = capabilities.tokenizer
+            fixed_messages = [
+                *snapshot_messages,
+                ChatMessage(
+                    role="user",
+                    content=_current_user_content(turn_user_message, turn_images),
+                ),
+                ChatMessage(
+                    role="assistant",
+                    content="Plan prepared:\n" + (
+                        plan_for_execute or "(no specific plan; answer directly)"
+                    ),
+                ),
+            ]
+            fixed_tokens = history_counter.text(execute_system)
+            fixed_tokens += history_counter.messages(fixed_messages)
+            fixed_tokens += history_counter.text(json.dumps([
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
+                for tool in (
+                    all_tool_defs() if capabilities.supports_tools else []
+                )
+            ], ensure_ascii=False, default=str))
+            reserve = max(
+                settings.agent_execute_max_tokens,
+                settings.conversation_compaction_reserve_tokens,
+            )
+            history_token_budget = max(
+                0,
+                int(capabilities.context_window) - reserve - fixed_tokens,
+            )
+        if history_token_budget is not None and history_token_budget < 256:
+            resumed_history = []
+        else:
+            resumed_history = await build_resumed_messages(
+                session_id,
+                current_conversation_id=conversation_id,
+                compaction_enabled=(
+                    settings.conversation_compaction_enabled
+                    and history_token_budget is not None
+                ),
+                token_budget=history_token_budget,
+                tokenizer=history_tokenizer,
+            )
         async for ev in _run_execute_phase(
             chat=chat,
             system_prompt=execute_system,
@@ -910,10 +972,20 @@ async def run_turn(
             },
         )
         conv = await session_service.get_conversation(db, conversation_id)
+        cache_summary = summarize_llm_calls([
+            call for call in (conv.llm_calls or []) if isinstance(call, dict)
+        ])
         usage = TurnUsage(
             input_tokens=conv.total_input_tokens or 0,
+            prompt_tokens=cache_summary.prompt_tokens,
             output_tokens=conv.total_output_tokens or 0,
             cache_read_tokens=conv.total_cache_read or 0,
+            cache_creation_tokens=cache_summary.cache_creation_tokens,
+            cache_eligible_prompt_tokens=cache_summary.eligible_prompt_tokens,
+            cache_eligible_read_tokens=cache_summary.eligible_read_tokens,
+            cache_eligible_estimated_tokens=cache_summary.eligible_estimated_tokens,
+            cache_eligible_requests=cache_summary.eligible_requests,
+            prompt_prefix_breaks=cache_summary.prefix_breaks,
             tool_calls=conv.total_tool_calls or 0,
             llm_calls=conv.total_llm_calls or 0,
             duration_ms=conv.total_duration_ms or 0,
@@ -929,8 +1001,26 @@ async def run_turn(
             "session_id": session_id,
             "conversation_id": conversation_id,
             "tokens_in": usage.input_tokens,
+            "prompt_tokens": usage.prompt_tokens,
             "tokens_out": usage.output_tokens,
             "cache_read": usage.cache_read_tokens,
+            "cache_creation": usage.cache_creation_tokens,
+            "cache_eligible_prompt_tokens": usage.cache_eligible_prompt_tokens,
+            "cache_eligible_read_tokens": usage.cache_eligible_read_tokens,
+            "cache_eligible_estimated_tokens": usage.cache_eligible_estimated_tokens,
+            "cache_eligible_requests": usage.cache_eligible_requests,
+            "cache_eligible_hit_ratio": (
+                usage.cache_eligible_read_tokens / usage.cache_eligible_prompt_tokens
+                if usage.cache_eligible_prompt_tokens > 0
+                else None
+            ),
+            "cache_eligible_reuse_ratio": (
+                usage.cache_eligible_read_tokens
+                / usage.cache_eligible_estimated_tokens
+                if usage.cache_eligible_estimated_tokens > 0
+                else None
+            ),
+            "prompt_prefix_breaks": usage.prompt_prefix_breaks,
             "tool_calls": usage.tool_calls,
             "llm_calls": usage.llm_calls,
             "duration_ms": usage.duration_ms,
@@ -1230,6 +1320,84 @@ def _cap_final_answer(answer: str, max_chars: int) -> tuple[str, bool]:
     return answer[:max_chars].rstrip(), True
 
 
+def _fit_provider_messages(
+    *,
+    chat: Any,
+    system_prompt: str,
+    messages: list[ChatMessage],
+    max_tokens: int,
+    tools: list[Any] | None,
+    preserved_prefix_count: int = 0,
+) -> tuple[list[ChatMessage], dict[str, Any]]:
+    """Fit one provider request to the resolved model's hard context limit.
+
+    The stable snapshot prefix is budgeted but never summarized, preserving its
+    prompt-cache identity. Conversation history and the growing current-turn
+    transcript are compacted as atomic tool exchanges when necessary.
+    """
+    capabilities = getattr(chat, "capabilities", None)
+    if capabilities is None:
+        return messages, {
+            "conversation_compacted": False,
+            "conversation_tokens_before": None,
+            "conversation_tokens_after": None,
+        }
+
+    counter = TokenCounter(capabilities.tokenizer)
+    tool_payload = [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }
+        for tool in (tools or [])
+    ]
+    fixed_tokens = counter.text(system_prompt)
+    fixed_tokens += counter.text(
+        json.dumps(tool_payload, ensure_ascii=False, default=str)
+    )
+    message_budget = int(capabilities.context_window) - max(1, int(max_tokens)) - fixed_tokens
+    if message_budget < 128:
+        raise ValueError(
+            "model context window is too small for the system prompt, tools, "
+            "and output reserve"
+        )
+
+    prefix_count = max(0, min(int(preserved_prefix_count), len(messages)))
+    prefix = messages[:prefix_count]
+    dynamic = messages[prefix_count:]
+    prefix_tokens = counter.messages(prefix)
+    dynamic_budget = message_budget - prefix_tokens
+    if dynamic_budget < 128:
+        raise ValueError(
+            "model context window is too small for the stable prompt prefix "
+            "and output reserve"
+        )
+
+    tokens_before = counter.messages(messages)
+    fitted, checkpoint = fit_messages_to_token_budget(
+        dynamic,
+        token_budget=dynamic_budget,
+        counter=counter,
+    )
+    result = [*prefix, *fitted]
+    tokens_after = counter.messages(result)
+    return result, {
+        "conversation_compacted": checkpoint is not None,
+        "conversation_tokens_before": tokens_before,
+        "conversation_tokens_after": tokens_after,
+        "conversation_token_budget": message_budget,
+        "conversation_tokenizer": counter.tokenizer,
+        "conversation_exact_token_count": counter.exact,
+        "conversation_checkpoint_summary_tokens": (
+            checkpoint.summary_tokens if checkpoint is not None else None
+        ),
+        "conversation_checkpoint_split_turn": (
+            checkpoint.split_turn if checkpoint is not None else None
+        ),
+    }
+
+
 async def _run_plan_phase(
     *,
     chat,
@@ -1240,14 +1408,25 @@ async def _run_plan_phase(
     prefix_messages: list[ChatMessage] | None = None,
     images: list[ImageBlock] | None = None,
 ) -> str:
-    started = time.monotonic()
+    settings = get_settings()
     messages = list(prefix_messages or []) + [
         ChatMessage(role="user", content=_current_user_content(user_message, images)),
     ]
+    request_messages, compaction_metrics = _fit_provider_messages(
+        chat=chat,
+        system_prompt=system_prompt,
+        messages=messages,
+        max_tokens=settings.agent_plan_max_tokens,
+        tools=None,
+        # The first message is the stable snapshot. Any following planner
+        # history is conversation context and may be compacted.
+        preserved_prefix_count=1 if prefix_messages else 0,
+    )
+    started = time.monotonic()
     resp = await chat.complete(ChatRequest(
         system=system_prompt,
-        messages=messages,
-        max_tokens=get_settings().agent_plan_max_tokens,
+        messages=request_messages,
+        max_tokens=settings.agent_plan_max_tokens,
         tools=None,            # Plan phase: zero tools (design §10.2).
         json_schema=None,
         cache_breakpoints=[0] if prefix_messages else [],
@@ -1263,11 +1442,16 @@ async def _run_plan_phase(
             phase="plan",
             model=getattr(chat, "model", "?"),
             input_tokens=resp.usage.input_tokens,
+            prompt_tokens=resp.usage.prompt_tokens,
             output_tokens=resp.usage.output_tokens,
             cache_read_tokens=resp.usage.cache_read_tokens,
             cache_creation_tokens=resp.usage.cache_creation_tokens,
             duration_ms=duration_ms,
-            extra={"plan_text": stored_plan_text, "mode": mode},
+            extra={
+                "plan_text": stored_plan_text,
+                "mode": mode,
+                **compaction_metrics,
+            },
         )
         await db.commit()
     return plan_text
@@ -1318,7 +1502,24 @@ _TEXT_SEARCHABLE_EXTS = frozenset({
     "py", "rb", "go", "rs", "java", "c", "h", "cpp", "hpp",
     "sh", "bash", "zsh", "ps1", "docx", "pptx", "pptm",
 })
+_PRESENTATION_EXTS = frozenset({"pptx", "pptm"})
+_SPREADSHEET_EXTS = frozenset({"xlsx", "xlsm"})
 _EPUB_MIMES = frozenset({"application/epub+zip"})
+
+
+@dataclass(frozen=True, slots=True)
+class _SpreadsheetLocator:
+    sheet: str
+    cell: str | None = None
+    row: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SpreadsheetTextUnit:
+    sheet: str
+    text: str
+    cell: str | None = None
+    row: int | None = None
 
 
 def _is_pdf_file(file: Any) -> bool:
@@ -1329,53 +1530,104 @@ def _is_pdf_file(file: Any) -> bool:
     return mime == "application/pdf" or ext == "pdf"
 
 
+def _is_docx_file(file: Any) -> bool:
+    if file is None:
+        return False
+    mime = (getattr(file, "mime_type", None) or "").lower()
+    ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
+    return ext == "docx" or "wordprocessingml.document" in mime
+
+
+def _is_presentation_file(file: Any) -> bool:
+    if file is None:
+        return False
+    mime = (getattr(file, "mime_type", None) or "").lower()
+    ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
+    return ext in _PRESENTATION_EXTS or "presentationml.presentation" in mime
+
+
+def _is_spreadsheet_file(file: Any) -> bool:
+    if file is None:
+        return False
+    mime = (getattr(file, "mime_type", None) or "").lower()
+    ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
+    return ext in _SPREADSHEET_EXTS or "spreadsheetml.sheet" in mime
+
+
+def _citation_query_string(params: list[tuple[str, object | None]]) -> str:
+    query: list[tuple[str, str]] = []
+    for key, value in params:
+        if value is None:
+            continue
+        if isinstance(value, int) and value <= 0:
+            continue
+        text = str(value)
+        if text:
+            query.append((key, text))
+    return f"?{urllib.parse.urlencode(query)}" if query else ""
+
+
+def _quote_query_value(quote: str | None) -> str | None:
+    if not quote:
+        return None
+    text = _unescape_quote(quote)
+    return text if text.strip() else None
+
+
 def _pick_query_string(
     file: Any,
     quote: str | None,
     page: str | None,
     *,
     located_pdf_page: int | None = None,
+    located_docx_block: int | None = None,
+    located_pptx_slide: int | None = None,
+    located_xlsx_cell: _SpreadsheetLocator | None = None,
 ) -> str:
-    """Decide the locator query string from (file_type, quote, page).
-
-    File type wins over what the LLM wrote: a PDF emits `?page=N` using
-    the quote-located physical page when available, a text-shaped file
-    emits `?q=<quote>` (or bare), and everything else (images, tables,
-    audio) emits a bare link. This means the LLM doesn't have to choose
-    between fields by file type — it can write both `quote="..."` and
-    `page=N` and the backend keeps whichever is meaningful for this entry.
-    """
+    """Build the complete viewer locator supported by the file's real type."""
     if file is None:
         return ""
+    query_quote = _quote_query_value(quote)
     if _is_pdf_file(file):
-        if located_pdf_page:
-            return f"?page={located_pdf_page}"
-        first = first_page_number(page)
-        return f"?page={first}" if first else ""
+        target_page = located_pdf_page or first_page_number(page)
+        if target_page is None:
+            return ""
+        return _citation_query_string([("page", target_page), ("q", query_quote)])
     mime = (getattr(file, "mime_type", None) or "").lower()
     ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
     kind = (getattr(file, "kind", None) or "").lower()
-    is_epub = ext == "epub" or mime in _EPUB_MIMES
-    is_presentation = (
-        ext in {"pptx", "pptm"}
-        or "presentationml.presentation" in mime
-    )
-    if is_presentation:
-        first = first_page_number(page)
-        if first:
-            return f"?page={first}"
-        if quote:
-            return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
-        return ""
-    if is_epub and quote:
-        return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
+    if query_quote and (ext == "epub" or mime in _EPUB_MIMES):
+        return _citation_query_string([("q", query_quote)])
+    if _is_docx_file(file):
+        return _citation_query_string(
+            [("block", located_docx_block), ("q", query_quote)]
+            if located_docx_block
+            else [("q", query_quote)]
+        )
+    if _is_presentation_file(file):
+        target_slide = located_pptx_slide or first_page_number(page)
+        return _citation_query_string([("page", target_slide), ("q", query_quote)])
+    if _is_spreadsheet_file(file):
+        if located_xlsx_cell is not None:
+            if located_xlsx_cell.cell:
+                return _citation_query_string([
+                    ("sheet", located_xlsx_cell.sheet),
+                    ("cell", located_xlsx_cell.cell),
+                    ("q", query_quote),
+                ])
+            return _citation_query_string([
+                ("sheet", located_xlsx_cell.sheet),
+                ("row", located_xlsx_cell.row),
+                ("q", query_quote),
+            ])
+        return _citation_query_string([("q", query_quote)])
     is_text_searchable = (
         kind in _TEXT_SEARCHABLE_KINDS
         or ext in _TEXT_SEARCHABLE_EXTS
         or mime.startswith("text/")
     )
-    if is_text_searchable and quote:
-        return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
+    if is_text_searchable and query_quote:
+        return _citation_query_string([("q", query_quote)])
     return ""
 
 
@@ -1420,6 +1672,161 @@ async def _resolve_pdf_page_locator(file: Any, page: str | None) -> int | None:
         return first
 
 
+def _locator_cache_key(file: Any) -> str | None:
+    for attr in ("sha256", "id", "storage_key"):
+        value = getattr(file, attr, None)
+        if value:
+            return f"{attr}:{value}"
+    return None
+
+
+async def _read_file_body_for_locator(file: Any) -> bytes:
+    storage_key = getattr(file, "storage_key", None)
+    if not storage_key:
+        raise ValueError("file has no storage_key")
+    from marginalia.pipelines.pdf_text import read_storage_bytes
+    from marginalia.storage import get_storage
+
+    return await read_storage_bytes(get_storage(), str(storage_key))
+
+
+async def _locate_docx_quote_block(
+    file: Any,
+    quote: str,
+    *,
+    blocks_cache: dict[str, list[str]] | None = None,
+) -> int | None:
+    if not quote.strip():
+        return None
+    try:
+        cache_key = _locator_cache_key(file)
+        if blocks_cache is not None and cache_key and cache_key in blocks_cache:
+            blocks = blocks_cache[cache_key]
+        else:
+            body = await _read_file_body_for_locator(file)
+            from marginalia.pipelines.docx import DocxPipeline
+
+            blocks = await asyncio.to_thread(DocxPipeline._parse_paragraphs_from_bytes, body)
+            if blocks_cache is not None and cache_key:
+                blocks_cache[cache_key] = blocks
+    except Exception:
+        log.exception("footnote rewrite: DOCX quote locator failed")
+        return None
+
+    needle = _unescape_quote(quote)
+    for index, block_text in enumerate(blocks, start=1):
+        if quote_matches_source_text(block_text, needle):
+            return index
+    return None
+
+
+async def _locate_pptx_quote_slide(
+    file: Any,
+    quote: str,
+    *,
+    slides_cache: dict[str, list[str]] | None = None,
+) -> int | None:
+    if not quote.strip():
+        return None
+    try:
+        cache_key = _locator_cache_key(file)
+        if slides_cache is not None and cache_key and cache_key in slides_cache:
+            slides = slides_cache[cache_key]
+        else:
+            body = await _read_file_body_for_locator(file)
+            from marginalia.pipelines.pptx import MAX_PPTX_SLIDES, PptxPipeline
+
+            slides, _coverage = await asyncio.to_thread(
+                PptxPipeline._render_from_bytes_with_coverage,
+                body,
+                max_slides=MAX_PPTX_SLIDES,
+            )
+            if slides_cache is not None and cache_key:
+                slides_cache[cache_key] = slides
+    except Exception:
+        log.exception("footnote rewrite: PPTX quote locator failed")
+        return None
+
+    needle = _unescape_quote(quote)
+    for index, slide_text in enumerate(slides, start=1):
+        if quote_matches_source_text(slide_text, needle):
+            return index
+    return None
+
+
+async def _locate_xlsx_quote_cell(
+    file: Any,
+    quote: str,
+    *,
+    units_cache: dict[str, list[_SpreadsheetTextUnit]] | None = None,
+) -> _SpreadsheetLocator | None:
+    if not quote.strip():
+        return None
+    try:
+        cache_key = _locator_cache_key(file)
+        if units_cache is not None and cache_key and cache_key in units_cache:
+            units = units_cache[cache_key]
+        else:
+            body = await _read_file_body_for_locator(file)
+            units = await asyncio.to_thread(_extract_spreadsheet_text_units, body)
+            if units_cache is not None and cache_key:
+                units_cache[cache_key] = units
+    except Exception:
+        log.exception("footnote rewrite: XLSX quote locator failed")
+        return None
+
+    needle = _unescape_quote(quote)
+    for unit in units:
+        if unit.cell and quote_matches_source_text(unit.text, needle):
+            return _SpreadsheetLocator(sheet=unit.sheet, cell=unit.cell, row=unit.row)
+    for unit in units:
+        if unit.cell is None and quote_matches_source_text(unit.text, needle):
+            return _SpreadsheetLocator(sheet=unit.sheet, row=unit.row)
+    return None
+
+
+def _extract_spreadsheet_text_units(body: bytes) -> list[_SpreadsheetTextUnit]:
+    from io import BytesIO
+
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(BytesIO(body), data_only=True, read_only=True)
+    try:
+        units: list[_SpreadsheetTextUnit] = []
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            for row_index, row in enumerate(worksheet.iter_rows(), start=1):
+                row_values: list[str] = []
+                row_no: int | None = None
+                row_has_value = False
+                for cell in row:
+                    if row_no is None:
+                        row_no = getattr(cell, "row", None) or row_index
+                    value = getattr(cell, "value", None)
+                    text = "" if value is None else str(value)
+                    row_values.append(text)
+                    if value is None:
+                        continue
+                    row_has_value = True
+                    coordinate = getattr(cell, "coordinate", None)
+                    if coordinate:
+                        units.append(_SpreadsheetTextUnit(
+                            sheet=sheet_name,
+                            cell=str(coordinate),
+                            row=row_no,
+                            text=text,
+                        ))
+                if row_has_value:
+                    units.append(_SpreadsheetTextUnit(
+                        sheet=sheet_name,
+                        row=row_no or row_index,
+                        text=" ".join(value for value in row_values if value.strip()),
+                    ))
+        return units
+    finally:
+        workbook.close()
+
+
 def _footnote_detail(reason: str | None, quote: str | None) -> str | None:
     parts: list[str] = []
     if quote:
@@ -1449,15 +1856,15 @@ async def _rewrite_footnotes_for_display(
     resolve_pdf_page_labels: bool = True,
 ) -> str:
     """Resolve `[^a]: entry_id=<uuid>, quote="...", page=N - reason` defs to
-    `[^a]: [name](entry:<id>?q=...|?page=N) — reason` for live SSE rendering.
+    file-type-aware links with exact PDF and Office locators for live rendering.
 
     The persisted `agent_response` keeps the raw form so downstream exports
     still parse. Missing/ambiguous ids fall back to `(entry <short> unavailable)`.
     Legacy `lines=`/`section_id=` fields are tolerated but don't produce a
     deep-link query string. Locator selection (page vs quote vs bare) is
     driven by the entry's actual file type — see [[_pick_query_string]].
-    Replay callers can disable PDF text extraction and page-label reads when
-    latency matters more than correcting a stored `page=` value.
+    Replay callers can disable source reads and PDF page-label lookup when
+    latency matters more than reconstructing exact locators.
     """
     if not answer or "entry_id" not in answer:
         return answer
@@ -1489,7 +1896,14 @@ async def _rewrite_footnotes_for_display(
         return answer
 
     located_pdf_pages: dict[int, int] = {}
+    located_pdf_quotes: set[int] = set()
+    located_docx_blocks: dict[int, int] = {}
+    located_pptx_slides: dict[int, int] = {}
+    located_xlsx_cells: dict[int, _SpreadsheetLocator] = {}
     pdf_pages_cache: dict[str, PdfTextRange] = {}
+    docx_blocks_cache: dict[str, list[str]] = {}
+    pptx_slides_cache: dict[str, list[str]] = {}
+    xlsx_units_cache: dict[str, list[_SpreadsheetTextUnit]] = {}
     for footnote in footnotes:
         raw_eid = footnote.entry_id
         full_eid = resolved.get(raw_eid, raw_eid)
@@ -1502,11 +1916,32 @@ async def _rewrite_footnotes_for_display(
                 located = await _locate_pdf_quote_page(
                     file, quote, pages_cache=pdf_pages_cache,
                 )
+                if located is not None:
+                    located_pdf_quotes.add(footnote.start)
             if located is None and page and resolve_pdf_page_labels:
                 located = await _resolve_pdf_page_locator(file, page)
             if located:
                 located_pdf_pages[footnote.start] = located
             continue
+        if locate_pdf_quotes and quote:
+            if _is_docx_file(file):
+                block = await _locate_docx_quote_block(
+                    file, quote, blocks_cache=docx_blocks_cache,
+                )
+                if block:
+                    located_docx_blocks[footnote.start] = block
+            elif _is_presentation_file(file):
+                slide = await _locate_pptx_quote_slide(
+                    file, quote, slides_cache=pptx_slides_cache,
+                )
+                if slide:
+                    located_pptx_slides[footnote.start] = slide
+            elif _is_spreadsheet_file(file):
+                cell = await _locate_xlsx_quote_cell(
+                    file, quote, units_cache=xlsx_units_cache,
+                )
+                if cell is not None:
+                    located_xlsx_cells[footnote.start] = cell
     footnote_by_start = {footnote.start: footnote for footnote in footnotes}
 
     def _replace(m: re.Match[str]) -> str:
@@ -1523,11 +1958,18 @@ async def _rewrite_footnotes_for_display(
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
+            file = file_by_id.get(full_eid)
+            query_quote = quote
+            if quote and _is_pdf_file(file) and m.start() not in located_pdf_quotes:
+                query_quote = None
             qs = _pick_query_string(
-                file_by_id.get(full_eid),
-                quote,
+                file,
+                query_quote,
                 page,
                 located_pdf_page=located_pdf_pages.get(m.start()),
+                located_docx_block=located_docx_blocks.get(m.start()),
+                located_pptx_slide=located_pptx_slides.get(m.start()),
+                located_xlsx_cell=located_xlsx_cells.get(m.start()),
             )
             head = f"[{_escape_markdown_label(name)}](entry:{full_eid}{qs})"
         detail = _footnote_detail(reason, quote)
@@ -1575,7 +2017,9 @@ async def _run_execute_phase(
         plan_text="",
     )
     quick_mode = options.mode == "quick"
-    tool_defs = all_tool_defs()
+    capabilities = getattr(chat, "capabilities", None)
+    tools_supported = capabilities is None or bool(capabilities.supports_tools)
+    tool_defs = all_tool_defs() if tools_supported else []
     ctx = ToolContext(
         session_id=session_id,
         conversation_id=conversation_id,
@@ -1617,6 +2061,11 @@ async def _run_execute_phase(
     budget_upgrade_notice: dict[str, Any] | None = None
     tool_calls_seen = False
     no_tool_repair_used = False
+    prefix_tracker = PromptPrefixTracker()
+    execute_system_prompt = _execute_system_prompt_with_budget(
+        system_prompt,
+        limit=hard_execute_turns,
+    )
 
     for turn in range(max_total_turns):
         max_execute_turns = budget_state.limit
@@ -1650,11 +2099,26 @@ async def _run_execute_phase(
                 force_final_answer=force_final_answer,
             )
         )
-        loop_messages = messages + [
-            ChatMessage(role="user", content=budget_tail)
-        ] if budget_tail else messages
-        tools_disabled = continuing_final_answer or force_final_answer
-        request_tools = None if tools_disabled else tool_defs
+        if budget_tail:
+            messages.append(ChatMessage(role="user", content=budget_tail))
+        tools_disabled = (
+            continuing_final_answer or force_final_answer or not tools_supported
+        )
+        request_tools = tool_defs if tools_supported else None
+        loop_messages, compaction_metrics = _fit_provider_messages(
+            chat=chat,
+            system_prompt=execute_system_prompt,
+            messages=messages,
+            max_tokens=settings.agent_execute_max_tokens,
+            tools=request_tools,
+            preserved_prefix_count=len(prefix_messages or []),
+        )
+        if compaction_metrics["conversation_compacted"]:
+            # Adopt the checkpoint as this turn's in-memory provider view.
+            # Later rounds append to that exact view instead of regenerating a
+            # different hidden prefix from the full pre-compaction tape. The
+            # persisted conversation remains lossless.
+            messages[:] = loop_messages
 
         thinking_payload = {
             "round": max_execute_turns
@@ -1682,10 +2146,7 @@ async def _run_execute_phase(
 
         started = time.monotonic()
         resp = await chat.complete(ChatRequest(
-            system=_execute_system_prompt_with_budget(
-                system_prompt,
-                limit=max_execute_turns,
-            ),
+            system=execute_system_prompt,
             messages=loop_messages,
             max_tokens=settings.agent_execute_max_tokens,
             tools=request_tools,
@@ -1695,6 +2156,18 @@ async def _run_execute_phase(
             temperature=0.3,
         ))
         duration_ms = int((time.monotonic() - started) * 1000)
+        prompt_observation = prefix_tracker.observe(
+            system=execute_system_prompt,
+            tools=request_tools,
+            messages=loop_messages,
+            prompt_tokens=resp.usage.prompt_tokens,
+            allow_epoch_break=bool(compaction_metrics["conversation_compacted"]),
+            break_reason=(
+                "conversation_compaction"
+                if compaction_metrics["conversation_compacted"]
+                else None
+            ),
+        )
 
         async with session_scope() as db:
             await session_service.append_llm_call(
@@ -1703,6 +2176,7 @@ async def _run_execute_phase(
                 phase="execute",
                 model=getattr(chat, "model", "?"),
                 input_tokens=resp.usage.input_tokens,
+                prompt_tokens=resp.usage.prompt_tokens,
                 output_tokens=resp.usage.output_tokens,
                 cache_read_tokens=resp.usage.cache_read_tokens,
                 cache_creation_tokens=resp.usage.cache_creation_tokens,
@@ -1718,6 +2192,9 @@ async def _run_execute_phase(
                     "final_continuation_index": final_continuations
                     if continuing_final_answer else None,
                     "tools_disabled": tools_disabled,
+                    "tools_supported": tools_supported,
+                    **compaction_metrics,
+                    **prompt_observation.payload(),
                 },
             )
             await db.commit()
@@ -2230,13 +2707,48 @@ async def _dispatch_tool_calls(
                 }, ensure_ascii=False),
             )
 
-    # ---- spawn runnables (each task owns its own DB session) ----
-    tasks: dict[asyncio.Task, int] = {}
+    # ---- run a bounded rolling pool (each task owns its own DB session) ----
+    # A model can emit a large fan-out in one response. Starting every call at
+    # once used to consume one database connection and one result buffer per
+    # call. Queue the overflow while preserving completion-order SSE events.
+    scheduled: list[ScheduledTool[tuple[int, Any, Any]]] = []
     for idx, tc in enumerate(tool_calls):
-        if statuses[idx] != "runnable":
-            continue
-        reg = get_tool(tc.name)
-        tasks[asyncio.create_task(_run_tool(reg, ctx, tc))] = idx
+        if statuses[idx] == "runnable":
+            registration = get_tool(tc.name)
+            policy = getattr(registration, "policy", None)
+            scheduled.append(ScheduledTool(
+                index=len(scheduled),
+                cache_key=keys[idx],
+                concurrency=getattr(policy, "concurrency", "parallel"),
+                value=(idx, registration, tc),
+            ))
+
+    pending: deque[tuple[int, int, Any, Any]] = deque(
+        (wave_number, *call.value)
+        for wave_number, wave in enumerate(schedule_waves(scheduled))
+        for call in wave
+    )
+
+    tasks: dict[asyncio.Task, int] = {}
+    max_parallelism = get_settings().agent_max_parallel_tool_calls
+    active_wave: int | None = None
+    fatal_failure = False
+
+    def fill_task_slots() -> None:
+        nonlocal active_wave
+        if fatal_failure or not pending:
+            return
+        if not tasks:
+            active_wave = pending[0][0]
+        while (
+            pending
+            and pending[0][0] == active_wave
+            and len(tasks) < max_parallelism
+        ):
+            _wave, idx, reg, tc = pending.popleft()
+            tasks[asyncio.create_task(_run_tool(reg, ctx, tc))] = idx
+
+    fill_task_slots()
 
     # ---- drain in completion order ----
     try:
@@ -2245,12 +2757,13 @@ async def _dispatch_tool_calls(
                 list(tasks.keys()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for task in done:
+            for task in sorted(done, key=lambda item: tasks[item]):
                 idx = tasks.pop(task)
                 tc = tool_calls[idx]
                 key = keys[idx]
                 duration_ms, result, exc = task.result()
                 if exc is not None:
+                    fatal_failure = True
                     log.exception("tool %s failed", tc.name, exc_info=exc)
                     err = repr(exc)
                     await _persist_tool_call(
@@ -2378,9 +2891,66 @@ async def _dispatch_tool_calls(
                             "preview": preview[:TOOL_RESULT_PREVIEW_LEN],
                         }, ensure_ascii=False),
                     )
+            fill_task_slots()
     finally:
         for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # A fatal executor failure is a stop signal, not permission to silently
+    # drop the model's remaining tool calls. Return explicit error results for
+    # every call that was deliberately left unstarted so the assistant/tool
+    # exchange remains structurally complete.
+    while pending:
+        _wave, idx, _reg, tc = pending.popleft()
+        key = keys[idx]
+        err = "tool execution was not started after an earlier tool failed"
+        await _persist_tool_call(
+            conversation_id=conversation_id,
+            name=tc.name,
+            arguments=tc.arguments,
+            result=None,
+            error=err,
+            duration_ms=0,
+        )
+        placeholders[idx] = ToolResultBlock(
+            tool_call_id=tc.id,
+            content=f"ERROR: {err}",
+            is_error=True,
+        )
+        guard.remember(key, f"ERROR: {err}")
+        yield AgentEvent(
+            event_type="tool_result",
+            data=json.dumps({
+                "tool_call_id": tc.id,
+                "name": tc.name,
+                "ok": False,
+                "error": err,
+                "not_started": True,
+            }, ensure_ascii=False),
+        )
+        for follower_idx in leader_followers.get(idx, ()):
+            follower = tool_calls[follower_idx]
+            placeholders[follower_idx] = ToolResultBlock(
+                tool_call_id=follower.id,
+                content=(
+                    "[runtime guard] duplicate call this batch — leader was "
+                    f"not started.\nERROR: {err}"
+                ),
+                is_error=True,
+            )
+            yield AgentEvent(
+                event_type="tool_result",
+                data=json.dumps({
+                    "tool_call_id": follower.id,
+                    "name": follower.name,
+                    "ok": False,
+                    "deduped": True,
+                    "error": err,
+                    "not_started": True,
+                }, ensure_ascii=False),
+            )
 
     # ---- finalize: source-order result_blocks + doom-loop nudge ----
     for ph in placeholders:
@@ -2410,9 +2980,18 @@ async def _run_tool(reg, ctx: ToolContext, tc) -> tuple[int, Any, Exception | No
     """
     started = time.monotonic()
     try:
-        async with session_scope() as db:
-            result = await reg.handler(db, ctx, tc.arguments)
-            await db.commit()
+        policy = getattr(reg, "policy", None)
+        timeout_seconds = getattr(policy, "timeout_seconds", 120.0)
+        async with asyncio.timeout(timeout_seconds):
+            async with session_scope() as db:
+                async with tool_execution_lock(
+                    db,
+                    concurrency=getattr(policy, "concurrency", "parallel"),
+                    session_id=ctx.session_id,
+                    tool_name=getattr(reg, "name", getattr(tc, "name", "tool")),
+                ):
+                    result = await reg.handler(db, ctx, tc.arguments)
+                    await db.commit()
         return int((time.monotonic() - started) * 1000), result, None
     except Exception as exc:  # noqa: BLE001
         return int((time.monotonic() - started) * 1000), None, exc

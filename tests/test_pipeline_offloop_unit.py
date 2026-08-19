@@ -79,7 +79,7 @@ def record_to_thread(monkeypatch):
     return calls, threads
 
 
-async def _fake_index(body, ctx, *, kind, coverage):
+async def _fake_index(body, ctx, *, kind, coverage, **_kwargs):
     return _FakeResult(body=body, ctx=ctx, kind=kind, coverage=coverage)
 
 

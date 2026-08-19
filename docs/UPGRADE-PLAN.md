@@ -172,8 +172,8 @@
 - 背景：`repositories/entries.py:127-148` 的 `_metadata_fts_query` 对非 SQLite 方言直接
   返回 None，元数据文本检索在 Postgres 上退化为无索引 `ILIKE` 顺序扫描。导致反直觉的
   不对称：**面向多机的 remote 部署检索能力反而弱于单机 SQLite**。
-- 改动：Postgres 分支用 `to_tsvector`/`websearch_to_tsquery` + GIN 索引（参照 Atlas 的
-  `search/fts.py` 实现），或 `pg_trgm`。新增对应 alembic + bootstrap 索引创建。
+- 改动：Postgres 分支用 `to_tsvector`/`websearch_to_tsquery` + GIN 索引，
+  或 `pg_trgm`。新增对应 alembic + bootstrap 索引创建。
   保持现有 `_apply_metadata_fts_filter`/`_join` 的接口，仅替换方言实现。
 - 验收：同一查询在 SQLite 与 Postgres 后端返回可比结果；Postgres 上有 GIN 索引、
   `EXPLAIN` 不是 seq scan。

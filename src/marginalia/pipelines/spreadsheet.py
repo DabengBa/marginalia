@@ -28,6 +28,7 @@ from marginalia.pipelines.base import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +56,19 @@ class SpreadsheetPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body, coverage = await self._extract_text_with_coverage(
-            storage, ctx.storage_key,
-        )
+        with measure_stage("extraction"):
+            body, coverage = await self._extract_text_with_coverage(
+                storage, ctx.storage_key,
+            )
+        fallback_sections = _sheet_sections(coverage)
         return await index_extracted_text(
-            body, ctx, kind="table", coverage=coverage,
+            body,
+            ctx,
+            kind="table",
+            coverage=coverage,
+            fallback_sections=fallback_sections,
+            pipeline=self.name,
+            metadata={**coverage, "sections": fallback_sections},
         )
 
     async def read_segment(
@@ -267,6 +276,32 @@ def _render_workbook(wb: Any, *, read_full: bool = False) -> tuple[str, dict[str
     if not read_full:
         coverage["max_rows_per_sheet"] = MAX_ROWS_PER_SHEET
     return "\n".join(parts).strip(), coverage
+
+
+def _sheet_sections(coverage: dict[str, Any]) -> list[dict[str, Any]]:
+    """Represent each indexed worksheet as a stable named section."""
+    sections: list[dict[str, Any]] = []
+    raw_sheets = coverage.get("sheets")
+    if not isinstance(raw_sheets, list):
+        return sections
+    for index, sheet in enumerate(raw_sheets[:200], start=1):
+        if not isinstance(sheet, dict):
+            continue
+        name = str(sheet.get("name") or f"Sheet {index}").strip()
+        indexed_rows = max(0, int(sheet.get("indexed_rows") or 0))
+        total_rows = max(indexed_rows, int(sheet.get("total_rows") or 0))
+        partial = bool(sheet.get("indexed_partial"))
+        scope = f"rows 1-{indexed_rows}" if indexed_rows else "empty sheet"
+        if partial:
+            scope += f" of approximately {total_rows}"
+        sections.append({
+            "id": f"s{index}",
+            "title": name,
+            "anchor": {"unit": "sheet", "value": name},
+            "summary": scope,
+            "key_terms": [name],
+        })
+    return sections
 
 
 def _iter_rows(ws: Any, hard_limit: int | None):

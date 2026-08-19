@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
 import os
 import time
@@ -14,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import marginalia.tasks.handlers  # noqa: F401  (registers task handlers)
+from marginalia import __version__
 from marginalia.api.routes_agent import router as sessions_router
 from marginalia.api.routes_chat import router as chat_router
 from marginalia.api.routes_exports import router as exports_router
@@ -25,17 +25,16 @@ from marginalia.api.routes_semantic_index import router as semantic_index_router
 from marginalia.api.routes_settings import router as settings_router
 from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
-from marginalia.api.routes_upload import (
-    _MULTIPART_OVERHEAD as _UPLOAD_MULTIPART_OVERHEAD,
-    router as upload_router,
-)
+from marginalia.api.routes_upload import router as upload_router
 from marginalia.api.routes_user_files import router as user_files_router
 from marginalia.api.routes_webdav_sync import router as webdav_sync_router
 from marginalia.config import LlmConfigError, get_settings, validate_llm_config
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.db.engine import dispose_engine
+from marginalia.provider_clients import close_provider_clients
 from marginalia.server_discovery import clear_server_state, write_server_state
 from marginalia.tasks.runner import TaskRunner
+from marginalia.upload_limits import UploadSizeLimitMiddleware
 
 log = logging.getLogger(__name__)
 SLOW_REQUEST_LOG_MS = 10_000
@@ -103,6 +102,7 @@ async def lifespan(app: FastAPI):
             await runner.stop()
         if state_written:
             clear_server_state(settings.marginalia_home, pid=os.getpid())
+        await close_provider_clients()
         await dispose_engine()
         log.info("backend shutdown complete")
 
@@ -229,89 +229,6 @@ app.add_middleware(
 )
 
 
-class _UploadTooLargeAbort(Exception):
-    """Signals the receive wrapper hit the streamed-byte budget."""
-
-
-class UploadSizeLimitMiddleware:
-    """Reject oversized uploads BEFORE Starlette spools the multipart body.
-
-    The in-route cap (routes_upload) only runs after FastAPI has resolved the
-    ``UploadFile`` dependency, by which point Starlette has already written the
-    whole body to a SpooledTemporaryFile (rolling onto the tmp partition past
-    1 MB) — so a huge or chunked upload can exhaust disk before the route sees
-    it. This ASGI middleware wraps ``receive`` and stops that at the door:
-    it rejects on an over-limit Content-Length up front, and counts streamed
-    bytes to abort a chunked/underreported body mid-flight. Active only when
-    ``upload_max_bytes`` is configured; the route keeps its own cap as the
-    authoritative second line of defence.
-    """
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST" \
-                or scope.get("path") != f"{V1_PREFIX}/upload":
-            return await self.app(scope, receive, send)
-        max_bytes = get_settings().upload_max_bytes
-        if not max_bytes or max_bytes <= 0:
-            return await self.app(scope, receive, send)
-        limit = max_bytes + _UPLOAD_MULTIPART_OVERHEAD
-        headers = dict(scope.get("headers") or [])
-        content_length = headers.get(b"content-length")
-        if content_length is not None:
-            try:
-                if int(content_length) > limit:
-                    return await self._reject(send, max_bytes)
-            except ValueError:
-                pass
-
-        total = 0
-        response_started = False
-
-        async def counting_receive():
-            nonlocal total
-            message = await receive()
-            if message["type"] == "http.request":
-                total += len(message.get("body", b""))
-                if total > limit:
-                    raise _UploadTooLargeAbort()
-            return message
-
-        async def watching_send(message):
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
-            await send(message)
-
-        try:
-            await self.app(scope, counting_receive, watching_send)
-        except _UploadTooLargeAbort:
-            # The body parser hasn't produced a response yet at the point it
-            # pulls the body, so we can still answer 413 ourselves.
-            if not response_started:
-                await self._reject(send, max_bytes)
-
-    @staticmethod
-    async def _reject(send, max_bytes: int) -> None:
-        body = json.dumps({
-            "detail": {
-                "error": "upload_too_large",
-                "max_bytes": max_bytes,
-            }
-        }).encode()
-        await send({
-            "type": "http.response.start",
-            "status": 413,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
-        })
-        await send({"type": "http.response.body", "body": body})
-
-
 app.add_middleware(UploadSizeLimitMiddleware)
 
 
@@ -401,4 +318,11 @@ app.include_router(mcp_router, prefix=V1_PREFIX)
 @app.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
     s = get_settings()
-    return {"status": "ok", "storage_backend": s.storage_backend}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "git_sha": s.build_sha,
+        "build_id": s.build_id,
+        "environment": s.app_env,
+        "storage_backend": s.storage_backend,
+    }

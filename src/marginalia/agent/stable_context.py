@@ -45,6 +45,10 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.session import session_scope
+from marginalia.agent.conversation_compaction import (
+    TokenCounter,
+    fit_messages_to_token_budget,
+)
 from marginalia.llm.prompt_cache import cacheable_prefix_messages
 from marginalia.llm.types import ChatMessage, ToolResultBlock, ToolUseBlock
 from marginalia.repositories import sessions as session_service
@@ -55,13 +59,21 @@ from marginalia.repositories import tags as tags_repo
 from marginalia.repositories import views as views_repo
 
 
+class ConversationHistoryIntegrityError(RuntimeError):
+    """Stored tool history cannot be replayed without changing its meaning."""
+
+
 EXECUTE_PHASE_PROMPT = """You are Marginalia's online investigator.
 
-Answer in the same natural language as the user's latest message unless they
-explicitly ask otherwise. If the user writes in Chinese, answer in Chinese even
-when sources, tool results, or internal notes are English; keep proper nouns and
-verbatim quotes unchanged. First check your journal for prior investigation
-paths, then use tools to gather evidence, then give a concise Markdown answer.
+Answer in the same natural language as the user's latest original question
+unless they explicitly ask otherwise. The language of retrieved files,
+metadata, tool results, snapshots, journal notes, planner notes, runtime guard
+messages, or prior assistant answers must not change the answer language. If
+the question is in English and all sources are Chinese, answer in English; if
+the question is in Chinese and sources are English, answer in Chinese. Keep
+proper nouns and verbatim quotes unchanged. First check your journal for prior
+investigation paths, then use tools to gather evidence, then give a concise
+Markdown answer.
 
 Core rules:
 - Be brief, evidence-based, and explicit about missing evidence. Do not fill
@@ -173,6 +185,9 @@ Output exactly one form, ending with a session title line:
    `Session name: <2-8 word title in the user's language>`
 
 Plan constraints:
+- For every "user's language" requirement, use the natural language of the
+  current turn's Question field, not the language of source excerpts,
+  snapshots, metadata, prior assistant answers, or retrieved files.
 - For normal plans, the first line must be exactly one budget line:
   `BUDGET: quick`, `BUDGET: standard`, or `BUDGET: deep`.
 - Pick `quick` when the task probably needs only a small number of reads,
@@ -390,7 +405,12 @@ async def build_plan_history_messages(
 
 
 async def build_resumed_messages(
-    session_id: str, *, current_conversation_id: str,
+    session_id: str,
+    *,
+    current_conversation_id: str,
+    compaction_enabled: bool = False,
+    token_budget: int | None = None,
+    tokenizer: str = "utf8_upper_bound",
 ) -> list[ChatMessage]:
     """Reconstruct the LLM's prior conversation history for an open session.
 
@@ -427,7 +447,7 @@ async def build_resumed_messages(
             ChatMessage(role="user", content=conv.user_message)
         ]
 
-        tool_calls = [tc for tc in (conv.tool_calls or []) if isinstance(tc, dict)]
+        tool_calls = _validated_tool_calls(conv)
         if tool_calls:
             assistant_blocks: list = []
             tool_blocks: list[ToolResultBlock] = []
@@ -466,17 +486,25 @@ async def build_resumed_messages(
             ))
         groups.append(group)
 
-    kept: list[list[ChatMessage]] = []
-    used = 0
-    elided = False
-    for group in reversed(groups):
-        size = sum(_message_chars(m) for m in group)
-        if kept and used + size > RESUME_TOTAL_BUDGET_CHARS:
-            elided = True
-            break
-        kept.append(group)
-        used += size
-    kept.reverse()
+    if compaction_enabled:
+        # The request layer will fit this lossless reconstruction to the
+        # resolved model's token window and create a structured checkpoint.
+        # Keeping every source group here prevents the old character cap from
+        # silently discarding facts before token-aware compaction can see them.
+        kept = groups
+        elided = False
+    else:
+        kept = []
+        used = 0
+        elided = False
+        for group in reversed(groups):
+            size = sum(_message_chars(m) for m in group)
+            if kept and used + size > RESUME_TOTAL_BUDGET_CHARS:
+                elided = True
+                break
+            kept.append(group)
+            used += size
+        kept.reverse()
 
     history: list[ChatMessage] = []
     if elided:
@@ -486,7 +514,40 @@ async def build_resumed_messages(
 
     if history:
         history.append(ChatMessage(role="user", content=RESUME_BOUNDARY_NOTE))
+    if compaction_enabled and token_budget is not None and history:
+        history, _checkpoint = fit_messages_to_token_budget(
+            history,
+            token_budget=max(128, int(token_budget)),
+            counter=TokenCounter(tokenizer),
+        )
     return history
+
+
+def _validated_tool_calls(conv: Any) -> list[dict[str, Any]]:
+    raw = conv.tool_calls or []
+    if not isinstance(raw, list):
+        raise ConversationHistoryIntegrityError(
+            f"conversation {conv.id} has non-list tool history"
+        )
+    validated: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        label = f"conversation {conv.id} tool call {index + 1}"
+        if not isinstance(item, dict):
+            raise ConversationHistoryIntegrityError(f"{label} is not an object")
+        name = item.get("name")
+        arguments = item.get("arguments")
+        if not isinstance(name, str) or not name.strip():
+            raise ConversationHistoryIntegrityError(f"{label} has no valid name")
+        if not isinstance(arguments, dict):
+            raise ConversationHistoryIntegrityError(
+                f"{label} has non-object arguments"
+            )
+        if "result" not in item and "error" not in item:
+            raise ConversationHistoryIntegrityError(
+                f"{label} has neither result nor error"
+            )
+        validated.append(item)
+    return validated
 
 
 def _message_chars(message: ChatMessage) -> int:

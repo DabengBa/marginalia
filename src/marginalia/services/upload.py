@@ -16,7 +16,8 @@ We:
   5. SELECT files WHERE sha256 = <hash>:
      * hit  → drop the temp object, find a seed entry (any file_entry sharing
               file_id), INSERT a new entry copying catalog_id / extra +
-              entry_tags rows (source='dedup_seed'), do NOT enqueue ingest
+              entry_tags rows (source='dedup_seed'); recover unfinished ingest
+              or enqueue a per-file semantic refresh for completed content
      * miss → INSERT files row (description fields blank, ingest_status=
               'pending'), INSERT entry (AI fields blank), enqueue ingest_file
 
@@ -45,7 +46,7 @@ from marginalia.repositories import folders as folders_repo
 from marginalia.storage.base import StorageBackend
 from marginalia.storage.mirror import MirrorStorage
 from marginalia.tasks.enqueue import enqueue
-from marginalia.tasks.kinds import KIND_INGEST_FILE
+from marginalia.tasks.kinds import KIND_INGEST_FILE, KIND_REFRESH_SEMANTIC_FILE
 from marginalia.utils.hashing import StreamHasher
 from marginalia.utils.ids import new_id, storage_prefix
 
@@ -71,6 +72,9 @@ class UploadResult:
     deduped: bool          # True if sha256 hit an existing file
     auto_renamed: bool     # True if display_name was suffixed (rename policy)
     skipped: bool = False  # True if skip policy returned a pre-existing entry
+    # Internal compensation handle.  Only a newly-created File owns a stored
+    # object; deduplicated/skipped results deliberately leave this unset.
+    storage_key: str | None = None
 
 class DisplayNameConflictError(Exception):
     """Raised when on_conflict='error' and the target name is taken.
@@ -277,41 +281,41 @@ async def upload(
     sha256 = hasher.hexdigest
     size = hasher.size
 
-    now = datetime.now(timezone.utc)
-
-    # In mirror mode each upload gets its own file row — dedup is OFF
-    # because the user explicitly opted into "files I can see in Finder
-    # are the files I have". Sharing a file row across two folders
-    # would require either symlinks (cross-platform pain) or a single
-    # canonical disk path (which contradicts the mirror promise).
-    is_mirror = isinstance(storage, MirrorStorage)
-
-    if is_mirror:
-        # Adopt the disk basename (put() may have sanitized/suffixed it)
-        # AND resolve any UNIQUE(files.storage_key) collision with a stale
-        # DB row before inserting — otherwise the flush 500s and orphans
-        # the vault file we just wrote.
-        storage_key, disk_name = await _resolve_storage_key_db_collision(
-            session, storage, storage_key,
-        )
-        if disk_name != final_name:
-            final_name = disk_name
-            auto_renamed = final_name != desired_name
-
-    if not is_mirror:
-        existing_file = await files_repo.get_by_sha256(session, sha256)
-        if existing_file is not None:
-            await storage.delete(storage_key)
-            return await _create_dedup_entry(
-                session,
-                file=existing_file,
-                folder_id=folder_id_for_lookup,
-                final_name=final_name,
-                auto_renamed=auto_renamed,
-                now=now,
-            )
-
     try:
+        now = datetime.now(timezone.utc)
+
+        # In mirror mode each upload gets its own file row — dedup is OFF
+        # because the user explicitly opted into "files I can see in Finder
+        # are the files I have". Sharing a file row across two folders
+        # would require either symlinks (cross-platform pain) or a single
+        # canonical disk path (which contradicts the mirror promise).
+        is_mirror = isinstance(storage, MirrorStorage)
+
+        if is_mirror:
+            # Adopt the disk basename (put() may have sanitized/suffixed it)
+            # AND resolve any UNIQUE(files.storage_key) collision with a stale
+            # DB row before inserting — otherwise the flush 500s and orphans
+            # the vault file we just wrote.
+            storage_key, disk_name = await _resolve_storage_key_db_collision(
+                session, storage, storage_key,
+            )
+            if disk_name != final_name:
+                final_name = disk_name
+                auto_renamed = final_name != desired_name
+
+        if not is_mirror:
+            existing_file = await files_repo.get_by_sha256(session, sha256)
+            if existing_file is not None:
+                await storage.delete(storage_key)
+                return await _create_dedup_entry(
+                    session,
+                    file=existing_file,
+                    folder_id=folder_id_for_lookup,
+                    final_name=final_name,
+                    auto_renamed=auto_renamed,
+                    now=now,
+                )
+
         return await _create_new_file_entry(
             session,
             file_id=tentative_file_id,
@@ -325,12 +329,16 @@ async def upload(
             auto_renamed=auto_renamed,
             now=now,
         )
-    except Exception:
-        # The row insert failed (e.g. a storage_key/UNIQUE race not caught
-        # by the pre-check above). The stored object would otherwise be
-        # orphaned — no row will ever reference it — so drop it before
-        # re-raising. storage.delete swallows a missing file.
-        await storage.delete(storage_key)
+    except BaseException:
+        # No commit has happened yet. Any lookup/flush/cancellation failure
+        # after the put therefore leaves this object unreferenced. Deleting
+        # twice is harmless when the dedup path already removed it.
+        try:
+            await storage.delete(storage_key)
+        except Exception:
+            # Preserve the database/cancellation failure. A later storage
+            # reconciliation can safely collect the orphan.
+            pass
         raise
 
 async def _create_new_file_entry(
@@ -425,6 +433,7 @@ async def _create_new_file_entry(
         display_name=final_name,
         deduped=False,
         auto_renamed=auto_renamed,
+        storage_key=storage_key,
     )
 
 async def _create_dedup_entry(
@@ -479,6 +488,41 @@ async def _create_dedup_entry(
             "seed_entry_id": seed.id if seed is not None else None,
         },
     )
+
+    if file.ingest_status == "done":
+        task_kind = KIND_REFRESH_SEMANTIC_FILE
+        task_payload = {"file_id": file.id}
+        dedup_key = f"{KIND_REFRESH_SEMANTIC_FILE}:{file.id}"
+    else:
+        # A prior failed/dead ingest must not make every later deduplicated
+        # upload permanently unsearchable. Reuse an active delivery when one
+        # exists, otherwise create a fresh task with the canonical file key.
+        task_kind = KIND_INGEST_FILE
+        task_payload = {"file_id": file.id, "display_name": final_name}
+        dedup_key = f"{KIND_INGEST_FILE}:{file.id}"
+
+    task = await enqueue(
+        session,
+        kind=task_kind,
+        payload=task_payload,
+        dedup_key=dedup_key,
+    )
+    if task is not None:
+        if task_kind == KIND_INGEST_FILE and task.status == "pending":
+            file.ingest_status = "pending"
+            file.updated_at = now
+        await audit_events_repo.append(
+            session,
+            kind="task_enqueued",
+            payload={
+                "task_id": task.id,
+                "kind": task_kind,
+                "file_id": file.id,
+                "entry_id": entry.id,
+                "deduplicated_upload": True,
+            },
+            task_id=task.id,
+        )
 
     return UploadResult(
         file_id=file.id,

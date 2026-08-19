@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from marginalia.llm.types import ChatResponse, TokenUsage
+from marginalia.pipelines.base import SegmentResult
 from marginalia.pipelines.image import ImagePipeline
 from marginalia.pipelines.pdf import PdfPipeline
 
@@ -96,6 +97,58 @@ def test_image_without_question_returns_persisted_description():
     assert result.extras.get("vlm_used") is not True
 
 
+def test_image_question_falls_back_after_live_vision_failure(monkeypatch):
+    class _FailingVisionClient:
+        async def complete(self, _request):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        "marginalia.pipelines.image.has_vision_profile", lambda: True,
+    )
+    monkeypatch.setattr(
+        "marginalia.pipelines.image.get_chat_client",
+        lambda _name: _FailingVisionClient(),
+    )
+    result = asyncio.run(ImagePipeline().read_segment(
+        file_row=SimpleNamespace(
+            storage_key="any",
+            summary="persisted image evidence",
+            description={},
+        ),
+        args={"question": "What is visible?"},
+        storage=_FakeStorage(_TINY_IMAGE_BYTES),
+    ))
+
+    assert result.error is None
+    assert result.text == "persisted image evidence"
+    assert result.extras["answered_by"] == "persisted_description"
+    assert "provider unavailable" in result.extras["warning"]
+
+
+def test_empty_image_vision_answer_is_an_error(monkeypatch):
+    fake = _FakeVisionClient(text="")
+    monkeypatch.setattr(
+        "marginalia.pipelines.image.has_vision_profile", lambda: True,
+    )
+    monkeypatch.setattr(
+        "marginalia.pipelines.image.get_chat_client", lambda _name: fake,
+    )
+
+    stored = asyncio.run(ImagePipeline().read_segment(
+        file_row=SimpleNamespace(storage_key="any", summary="", description={}),
+        args={"question": "What is visible?"},
+        storage=_FakeStorage(_TINY_IMAGE_BYTES),
+    ))
+    member = asyncio.run(ImagePipeline().read_segment_from_bytes(
+        _TINY_IMAGE_BYTES,
+        {"question": "What is visible?"},
+        filename="member.png",
+    ))
+
+    assert stored.error == "vision model returned no image answer"
+    assert member.error == "vision model returned no image answer"
+
+
 def test_ocr_pdf_without_question_reads_stored_text():
     pipeline = PdfPipeline()
     file_row = SimpleNamespace(
@@ -130,19 +183,67 @@ def test_ocr_pdf_without_question_reads_stored_text():
     assert result.extras.get("total_pages") == 3
 
 
-def test_text_pdf_ignores_ocr_branch():
-    """A regular text-layer PDF shouldn't get routed through VLM even
-    if `question` is set — the branch is only taken when description.ocr
-    is present."""
+def test_ocr_pdf_question_prefers_stored_text(monkeypatch):
+    async def forbidden_vision(*_args, **_kwargs):
+        raise AssertionError("stored OCR text must bypass vision")
+
+    monkeypatch.setattr(PdfPipeline, "_answer_with_vlm", forbidden_vision)
+    file_row = SimpleNamespace(
+        storage_key="any",
+        description={
+            "ocr": {"engine": "vlm", "pages_total": 1, "stored_pages": 1},
+            "ocr_pages": [{"page": 1, "text": "Invoice INV-42", "blocks": []}],
+        },
+    )
+    result = asyncio.run(PdfPipeline().read_segment(
+        file_row=file_row,
+        args={"question": "Which invoice?", "page_start": 1},
+        storage=_FakeStorage(b""),
+    ))
+
+    assert result.error is None
+    assert result.extras["mode"] == "pdf_ocr_question"
+    assert result.extras["answered_by"] == "persisted_pdf_ocr"
+    assert result.extras["source_text_preserved"] is True
+    assert "INV-42" in result.text
+
+
+def test_text_pdf_question_prefers_source_text(monkeypatch):
+    async def fake_read_bytes(self, storage, key):  # noqa: ARG001
+        return b"pdf bytes"
+
+    def fake_slice(self, body, args, *, file_row):  # noqa: ARG001
+        return SegmentResult(text="[Page 1]\nSource-layer definition")
+
+    async def forbidden_vision(*_args, **_kwargs):
+        raise AssertionError("text-layer PDF must bypass vision")
+
+    monkeypatch.setattr(PdfPipeline, "_read_bytes", fake_read_bytes)
+    monkeypatch.setattr(PdfPipeline, "_slice", fake_slice)
+    monkeypatch.setattr(PdfPipeline, "_answer_with_vlm", forbidden_vision)
+
+    result = asyncio.run(PdfPipeline().read_segment(
+        file_row=SimpleNamespace(storage_key="any", description={}),
+        args={"question": "What is defined?", "page_start": 1},
+        storage=_FakeStorage(b""),
+    ))
+
+    assert result.error is None
+    assert result.extras["mode"] == "pdf_text_question"
+    assert result.extras["answered_by"] == "pdf_text_layer"
+    assert result.extras["source_text_preserved"] is True
+    assert "Source-layer definition" in result.text
+
+
+def test_text_pdf_without_readable_text_requires_vision(monkeypatch):
+    monkeypatch.setattr(
+        "marginalia.pipelines.pdf.has_vision_profile", lambda: False,
+    )
     pipeline = PdfPipeline()
     file_row = SimpleNamespace(storage_key="any", description={})
-    # The slice path will fail with "PDF parse failed" since we hand it
-    # garbage bytes — that's enough to prove we took the slice branch
-    # and not the VLM branch.
     result = asyncio.run(pipeline.read_segment(
-        file_row=file_row,
-        args={"question": "ignored here"},
+        file_row=file_row, args={"question": "Inspect the page"},
         storage=_FakeStorage(b"not a pdf"),
     ))
     assert result.error is not None
-    assert "PDF parse failed" in result.error
+    assert "vision" in result.error.lower()

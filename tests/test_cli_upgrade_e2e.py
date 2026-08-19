@@ -420,7 +420,14 @@ def test_embedded_mode_starts_lifespan_and_exits_cleanly() -> None:
                 return {"health": health_body, "folders": r2.json()}
 
     out = asyncio.run(_go())
-    assert out["health"] == {"status": "ok", "storage_backend": "local"}
+    assert out["health"] == {
+        "status": "ok",
+        "version": "0.3.3",
+        "git_sha": "unknown",
+        "build_id": "local",
+        "environment": "dev",
+        "storage_backend": "local",
+    }
     assert isinstance(out["folders"], dict)
     print("[A4] embedded mode lifespan + ASGI transport round-trip OK")
 

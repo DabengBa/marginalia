@@ -19,9 +19,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import File
+from marginalia.db.models import EntryTag, File, FileEntry
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_relations as entry_relations_repo
@@ -33,6 +34,41 @@ from marginalia.tasks.kinds import KIND_INGEST_FILE
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def bulk_reprocess_file_ids_statement(
+    *,
+    payload: dict[str, object],
+    after_file_id: str | None = None,
+    limit: int | None = None,
+):
+    """Build a stable, paged file-id query for a bulk reprocess scope."""
+    stmt = select(File.id).where(File.deleted_at.is_(None))
+    requires_entry_join = bool(
+        payload.get("catalog_ids")
+        or payload.get("folder_ids")
+        or payload.get("tag_id")
+    )
+    if requires_entry_join:
+        stmt = stmt.join(FileEntry, FileEntry.file_id == File.id).where(
+            FileEntry.deleted_at.is_(None),
+        )
+    if payload.get("tag_id"):
+        stmt = stmt.join(EntryTag, EntryTag.entry_id == FileEntry.id).where(
+            EntryTag.tag_id == str(payload["tag_id"]),
+        )
+    if payload.get("catalog_ids"):
+        stmt = stmt.where(FileEntry.catalog_id.in_(payload["catalog_ids"]))
+    if payload.get("folder_ids"):
+        stmt = stmt.where(FileEntry.folder_id.in_(payload["folder_ids"]))
+    if payload.get("file_ids"):
+        stmt = stmt.where(File.id.in_(payload["file_ids"]))
+    if payload.get("status"):
+        stmt = stmt.where(File.ingest_status == str(payload["status"]))
+    if after_file_id:
+        stmt = stmt.where(File.id > after_file_id)
+    stmt = stmt.distinct().order_by(File.id.asc())
+    return stmt.limit(limit) if limit is not None else stmt
 
 
 async def reprocess_file(
@@ -78,7 +114,11 @@ async def reprocess_file(
     task = await enqueue(
         session,
         kind=KIND_INGEST_FILE,
-        payload={"file_id": file_row.id, "display_name": display_name},
+        payload={
+            "file_id": file_row.id,
+            "display_name": display_name,
+            "scheduled_by": scheduled_by,
+        },
         dedup_key=f"ingest_file:{file_row.id}",
     )
     if task is None:

@@ -38,13 +38,19 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "agent_final_answer_continue_turns",
     "agent_final_answer_max_chars",
     "agent_turn_timeout_seconds",
+    "agent_cache_slo_min_hit_ratio",
+    "agent_cache_slo_min_eligible_requests",
+    "conversation_compaction_enabled",
+    "conversation_compaction_reserve_tokens",
     "compression_enabled",
     "compression_min_chars",
     "compression_target_chars",
     "compression_context_chars",
     "compression_max_ratio",
+    "llm_ingest_max_tokens",
     "llm_ingest_concurrency",
     "worker_batch_size",
+    "bulk_reprocess_page_size",
     "maintenance_daily_token_budget",
     "relation_background_vetting_enabled",
     # WebDAV knowledge-pack publishing
@@ -60,15 +66,31 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "llm_default_base_url",
     "llm_default_model",
     "llm_default_tps",
+    "llm_default_dialect",
+    "llm_default_context_window",
+    "llm_default_tokenizer",
+    "llm_default_supports_vision",
+    "llm_default_supports_tools",
+    "llm_default_supports_temperature",
+    "llm_default_token_limit_param",
     # Per-profile overrides
     "llm_chat_provider", "llm_chat_api_key", "llm_chat_base_url", "llm_chat_model",
-    "llm_chat_tps",
+    "llm_chat_tps", "llm_chat_dialect", "llm_chat_context_window",
+    "llm_chat_tokenizer", "llm_chat_supports_vision", "llm_chat_supports_tools",
+    "llm_chat_supports_temperature", "llm_chat_token_limit_param",
     "llm_reflect_provider", "llm_reflect_api_key", "llm_reflect_base_url", "llm_reflect_model",
-    "llm_reflect_tps",
+    "llm_reflect_tps", "llm_reflect_dialect", "llm_reflect_context_window",
+    "llm_reflect_tokenizer", "llm_reflect_supports_vision",
+    "llm_reflect_supports_tools", "llm_reflect_supports_temperature",
+    "llm_reflect_token_limit_param",
     "llm_ingest_provider", "llm_ingest_api_key", "llm_ingest_base_url", "llm_ingest_model",
-    "llm_ingest_tps",
+    "llm_ingest_tps", "llm_ingest_dialect", "llm_ingest_context_window",
+    "llm_ingest_tokenizer", "llm_ingest_supports_vision", "llm_ingest_supports_tools",
+    "llm_ingest_supports_temperature", "llm_ingest_token_limit_param",
     "llm_vision_provider", "llm_vision_api_key", "llm_vision_base_url", "llm_vision_model",
-    "llm_vision_tps",
+    "llm_vision_tps", "llm_vision_dialect", "llm_vision_context_window",
+    "llm_vision_tokenizer", "llm_vision_supports_vision", "llm_vision_supports_tools",
+    "llm_vision_supports_temperature", "llm_vision_token_limit_param",
     # llm_audio_* fields are intentionally NOT in the allowlist: no
     # pipeline consumes the audio profile yet, so accepting writes
     # would just persist dead config that misleads the user when
@@ -84,6 +106,8 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "semantic_index_backend",
     "semantic_recall_enabled",
     "semantic_recall_limit",
+    "semantic_rebuild_page_size",
+    "section_backfill_min_score",
     "rerank_enabled",
     "rerank_api_key",
     "rerank_base_url",
@@ -107,6 +131,9 @@ _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "an
 _VALID_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"dashscope", "openai-compatible"})
 _VALID_SEMANTIC_INDEX_BACKENDS: frozenset[str] = frozenset({"auto", "file", "sqlite-vec"})
 _VALID_EVIDENCE_SELECTION: frozenset[str] = frozenset({"quota", "rerank"})
+_VALID_TOKEN_LIMIT_PARAMS: frozenset[str] = frozenset({
+    "max_tokens", "max_completion_tokens",
+})
 _VALID_CONFLICT: frozenset[str] = frozenset({"rename", "error", "skip"})
 
 
@@ -226,17 +253,27 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             if v not in _VALID_EVIDENCE_SELECTION:
                 bad.append(f"{k}: must be one of {sorted(_VALID_EVIDENCE_SELECTION)}")
                 continue
+        if k.endswith("_token_limit_param"):
+            if v not in _VALID_TOKEN_LIMIT_PARAMS:
+                bad.append(
+                    f"{k}: must be one of {sorted(_VALID_TOKEN_LIMIT_PARAMS)}"
+                )
+                continue
         if k in (
             "agent_plan_max_tokens",
             "agent_execute_max_tokens",
             "agent_execute_max_turns",
             "agent_final_answer_continue_turns",
             "agent_final_answer_max_chars",
+            "agent_cache_slo_min_eligible_requests",
+            "conversation_compaction_reserve_tokens",
             "compression_min_chars",
             "compression_target_chars",
             "compression_context_chars",
+            "llm_ingest_max_tokens",
             "llm_ingest_concurrency",
             "worker_batch_size",
+            "bulk_reprocess_page_size",
             "maintenance_daily_token_budget",
             "webdav_auto_sync_interval_minutes",
             "llm_default_tps",
@@ -244,10 +281,16 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "llm_reflect_tps",
             "llm_ingest_tps",
             "llm_vision_tps",
+            "llm_default_context_window",
+            "llm_chat_context_window",
+            "llm_reflect_context_window",
+            "llm_ingest_context_window",
+            "llm_vision_context_window",
             "embedding_dimensions",
             "embedding_tps",
             "embedding_batch_size",
             "semantic_recall_limit",
+            "semantic_rebuild_page_size",
             "rerank_tps",
             "rerank_batch_size",
             "rerank_top_n",
@@ -264,11 +307,19 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 bad.append(f"{k}: must be an integer")
                 continue
-            lower = 0 if k == "agent_final_answer_continue_turns" else 1
+            lower = (
+                0
+                if k in ("agent_final_answer_continue_turns", "llm_ingest_max_tokens")
+                else 1
+            )
             if k == "agent_execute_max_turns":
                 lower, upper = 3, 100
             elif k in ("llm_ingest_concurrency", "worker_batch_size"):
                 upper = 32
+            elif k == "llm_ingest_max_tokens":
+                upper = 16_384
+            elif k == "bulk_reprocess_page_size":
+                lower, upper = 10, 5_000
             elif k == "maintenance_daily_token_budget":
                 lower, upper = 0, 200_000_000
             elif k == "webdav_auto_sync_interval_minutes":
@@ -290,6 +341,14 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 upper = 10_000
             elif k == "semantic_recall_limit":
                 upper = 1000
+            elif k == "semantic_rebuild_page_size":
+                upper = 1000
+            elif k == "agent_cache_slo_min_eligible_requests":
+                upper = 1_000_000
+            elif k == "conversation_compaction_reserve_tokens":
+                lower, upper = 1024, 1_000_000
+            elif k.endswith("_context_window"):
+                lower, upper = 1024, 10_000_000
             elif k == "rerank_top_n":
                 upper = 1000
             elif k == "rerank_max_doc_chars":
@@ -311,7 +370,12 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             if v < lower or v > upper:
                 bad.append(f"{k}: out of range [{lower}, {upper}]")
                 continue
-        if k in ("agent_turn_timeout_seconds", "compression_max_ratio"):
+        if k in (
+            "agent_turn_timeout_seconds",
+            "compression_max_ratio",
+            "agent_cache_slo_min_hit_ratio",
+            "section_backfill_min_score",
+        ):
             try:
                 v = float(v)
             except (TypeError, ValueError):
@@ -319,6 +383,8 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 continue
             if k == "compression_max_ratio":
                 lower, upper = 0.05, 1.0
+            elif k in ("agent_cache_slo_min_hit_ratio", "section_backfill_min_score"):
+                lower, upper = 0.0, 1.0
             else:
                 lower, upper = 0.0, 86_400.0
             if v < lower or v > upper:
@@ -331,6 +397,22 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "relation_background_vetting_enabled",
             "webdav_auto_sync_enabled",
             "document_vision_enabled",
+            "llm_vision_supports_vision",
+            "llm_default_supports_vision",
+            "llm_default_supports_tools",
+            "llm_default_supports_temperature",
+            "llm_chat_supports_vision",
+            "llm_chat_supports_tools",
+            "llm_chat_supports_temperature",
+            "llm_reflect_supports_vision",
+            "llm_reflect_supports_tools",
+            "llm_reflect_supports_temperature",
+            "llm_ingest_supports_vision",
+            "llm_ingest_supports_tools",
+            "llm_ingest_supports_temperature",
+            "llm_vision_supports_tools",
+            "llm_vision_supports_temperature",
+            "conversation_compaction_enabled",
         ):
             if isinstance(v, str):
                 v = v.strip().lower() in {"1", "true", "yes", "on"}

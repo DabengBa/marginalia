@@ -52,6 +52,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from marginalia.agent.conversation_compaction import (
+    TokenCounter,
+    fit_messages_to_token_budget,
+)
 from marginalia.agent.stable_context import (
     build_resumed_messages,
     build_stable_snapshot,
@@ -64,6 +68,7 @@ from marginalia.db.models import (
     Session as SessionRow,
 )
 from marginalia.db.session import session_scope
+from marginalia.config import get_settings
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
@@ -190,6 +195,7 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
     resumed = await build_resumed_messages(
         conversation.session_id,
         current_conversation_id=conversation_id,
+        compaction_enabled=get_settings().conversation_compaction_enabled,
     )
 
     # Instead of replaying the current turn's full tool_calls (which
@@ -227,6 +233,27 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
     ]
 
     client = get_chat_client("reflect")
+    capabilities = getattr(client, "capabilities", None)
+    if capabilities is not None:
+        counter = TokenCounter(capabilities.tokenizer)
+        prefix_tokens = counter.messages(snapshot_messages)
+        message_budget = (
+            int(capabilities.context_window)
+            - 1024
+            - counter.text(system_prompt)
+            - prefix_tokens
+        )
+        if message_budget < 128:
+            raise ValueError(
+                "reflect model context window is too small for the stable "
+                "prompt prefix and output reserve"
+            )
+        fitted_tail, _checkpoint = fit_messages_to_token_budget(
+            reflect_messages[len(snapshot_messages):],
+            token_budget=message_budget,
+            counter=counter,
+        )
+        reflect_messages = [*snapshot_messages, *fitted_tail]
     resp = await client.complete(ChatRequest(
         system=system_prompt,
         messages=reflect_messages,

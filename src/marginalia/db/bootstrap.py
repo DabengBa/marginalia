@@ -829,6 +829,44 @@ def _ensure_conversations_session_turn_unique(bind) -> None:
     ))
 
 
+COLLAPSE_ACTIVE_TASK_DUPLICATES_SQL = """
+    WITH ranked AS (
+        SELECT
+            id,
+            row_number() OVER (
+                PARTITION BY dedup_key
+                ORDER BY
+                    CASE
+                        WHEN status = 'running'
+                         AND (lease_expires_at IS NULL OR lease_expires_at >= :now)
+                            THEN 0
+                        WHEN status = 'pending' AND attempts < max_attempts
+                            THEN 1
+                        WHEN status = 'running'
+                         AND lease_expires_at < :now
+                         AND attempts < max_attempts
+                            THEN 2
+                        ELSE 3
+                    END,
+                    created_at ASC,
+                    id ASC
+            ) AS duplicate_rank
+        FROM tasks
+        WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')
+    )
+    UPDATE tasks
+    SET status = 'dead',
+        finished_at = coalesce(finished_at, :now),
+        lease_expires_at = NULL,
+        last_heartbeat_at = NULL,
+        locked_by = NULL,
+        last_error = coalesce(last_error, :error)
+    WHERE id IN (
+        SELECT id FROM ranked WHERE duplicate_rank > 1
+    )
+"""
+
+
 def _ensure_tasks_active_dedup_unique(bind) -> None:
     """Enforce at most one pending/running task per dedup_key.
 
@@ -849,6 +887,20 @@ def _ensure_tasks_active_dedup_unique(bind) -> None:
     if has_unique:
         return
 
+    now = datetime.now(timezone.utc)
+    bind.execute(
+        sa.text(COLLAPSE_ACTIVE_TASK_DUPLICATES_SQL),
+        {
+            "now": now,
+            "error": (
+                "task queue reliability migration: duplicate active dedup key"
+            ),
+        },
+    )
+
+    # The windowed update keeps the most executable delivery for each key:
+    # live running, then healthy pending, then retryable expired, then exhausted.
+    # Fail closed if an unusual backend could not apply the reconciliation.
     dup_rows = bind.execute(sa.text(
         "SELECT dedup_key, COUNT(*) AS n "
         "FROM tasks "
@@ -862,8 +914,8 @@ def _ensure_tasks_active_dedup_unique(bind) -> None:
             f"(dedup_key={r[0]!r}, count={r[1]})" for r in dup_rows
         )
         raise RuntimeError(
-            "Cannot enforce unique active task dedup_key: existing active "
-            f"duplicates found - {sample}. Resolve or finish duplicates and restart."
+            "Could not reconcile duplicate active task dedup keys before "
+            f"creating the unique index - {sample}."
         )
 
     bind.execute(sa.text(

@@ -28,12 +28,12 @@ def registered_kinds() -> list[str]:
     return sorted(_REGISTRY)
 
 
-# 15 kinds: 14 business + 1 dispatcher.
-# Adding a new kind = registering a handler; this list is informational.
+# Adding a new kind = registering a handler; these constants are informational.
 
 # Online (user is waiting) ----------------------------------------------------
 KIND_REFLECT_TURN = "reflect_turn"
 KIND_INGEST_FILE = "ingest_file"
+KIND_BULK_REPROCESS_FILES = "bulk_reprocess_files"
 
 # Cross-session synthesis -----------------------------------------------------
 KIND_SUMMARIZE_SESSION = "summarize_session"
@@ -43,6 +43,7 @@ KIND_RECOVER_STUCK_TASKS = "recover_stuck_tasks"
 
 # Honor user intent -----------------------------------------------------------
 KIND_PURGE_DELETED_FILES = "purge_deleted_files"
+KIND_DELETE_STORAGE_OBJECT = "delete_storage_object"
 
 # Quality foundation (normalize then enrich, in one kind) --------------------
 KIND_TAG_QUALITY = "tag_quality"
@@ -58,6 +59,7 @@ KIND_MINE_RELATIONS = "mine_relations"
 KIND_VET_RELATIONS = "vet_relations"
 KIND_PROPOSE_VIEWS = "propose_views"
 KIND_REFRESH_ENTRY_EXTRA = "refresh_entry_extra"
+KIND_REFRESH_SEMANTIC_FILE = "refresh_semantic_file"
 KIND_REBUILD_SEMANTIC_INDEX = "rebuild_semantic_index"
 KIND_WEBDAV_PUBLISH = "webdav_publish"
 
@@ -81,9 +83,11 @@ KIND_PERIODIC_TICK = "periodic_tick"
 DEFAULT_PRIORITIES: Mapping[str, int] = {
     KIND_REFLECT_TURN: 30,
     KIND_INGEST_FILE: 50,
+    KIND_BULK_REPROCESS_FILES: 55,
     KIND_SUMMARIZE_SESSION: 60,
     KIND_RECOVER_STUCK_TASKS: 100,
     KIND_PURGE_DELETED_FILES: 150,
+    KIND_DELETE_STORAGE_OBJECT: 151,
     KIND_TAG_QUALITY: 200,
     KIND_RESTRUCTURE_CATALOGS: 220,
     KIND_SUGGEST_LIFECYCLE: 240,
@@ -91,6 +95,7 @@ DEFAULT_PRIORITIES: Mapping[str, int] = {
     KIND_VET_RELATIONS: 251,
     KIND_PROPOSE_VIEWS: 252,
     KIND_REFRESH_ENTRY_EXTRA: 255,
+    KIND_REFRESH_SEMANTIC_FILE: 255,
     KIND_REBUILD_SEMANTIC_INDEX: 255,
     KIND_WEBDAV_PUBLISH: 180,
     KIND_PRUNE: 260,

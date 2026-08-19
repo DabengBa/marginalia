@@ -77,6 +77,11 @@ const en = {
     recent: "Recent",
     noTasks: "No tasks yet.",
     cache: (pct: number) => `${pct}% cache`,
+    cacheSlo: (status: string): string => status === "met"
+      ? "cache SLO met"
+      : status === "breached"
+        ? "cache SLO breached"
+        : "cache SLO pending",
     llm: (n: number) => `${n} llm`,
     taskKind: {
       ingest_file: "File analysis",
@@ -739,6 +744,13 @@ const en = {
     model: "Model",
     baseUrl: "Base URL",
     apiKey: "API key",
+    dialect: "Request dialect",
+    contextWindow: "Context window",
+    tokenizer: "Tokenizer",
+    supportsVision: "Accepts images",
+    supportsTools: "Supports tool calling",
+    supportsTemperature: "Accepts temperature",
+    tokenLimitParam: "Output-token parameter",
     keepKeyHint: "Leave blank to keep the existing key. Type a new key to replace.",
     reset: "Reset to default",
     testConnection: "Test connection",
@@ -827,6 +839,11 @@ const zh: I18nStrings = {
     recent: "最近完成",
     noTasks: "暂无任务。",
     cache: (pct: number) => `缓存 ${pct}%`,
+    cacheSlo: (status: string) => status === "met"
+      ? "缓存 SLO 达标"
+      : status === "breached"
+        ? "缓存 SLO 未达标"
+        : "缓存 SLO 数据不足",
     llm: (n: number) => `${n} 次 LLM`,
     taskKind: {
       ingest_file: "文件分析",
@@ -1475,6 +1492,13 @@ const zh: I18nStrings = {
     model: "模型",
     baseUrl: "Base URL",
     apiKey: "API key",
+    dialect: "请求方言",
+    contextWindow: "上下文窗口",
+    tokenizer: "Tokenizer",
+    supportsVision: "支持图片输入",
+    supportsTools: "支持工具调用",
+    supportsTemperature: "支持 temperature 参数",
+    tokenLimitParam: "输出 token 参数名",
     keepKeyHint: "留空表示保留现有 key。输入新 key 则替换。",
     reset: "恢复默认",
     testConnection: "测试连接",

@@ -22,6 +22,7 @@ import base64
 import io
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -53,12 +54,14 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines._long_index import (
     build_retrieval_extra,
     fallback_section,
+    ingest_output_tokens,
     llm_ingest_concurrency,
     parse_index_response,
     render_sections_digest,
     renumber_sections,
 )
 from marginalia.pipelines.image import downscale_for_vlm
+from marginalia.pipelines.document_vision import prefer_source_text_for_question
 from marginalia.pipelines.pdf_text import (
     extract_pdf_page_labels,
     extract_pdf_text_range,
@@ -67,6 +70,7 @@ from marginalia.pipelines.pdf_text import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +96,24 @@ OCR_RENDER_BATCH_PAGES = 20
 OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
 OCR_VLM_MAX_LONG_EDGE = 2048      # OCR is glyph-sensitive — keep more
                                   # detail than the caption path's 1568
+PDF_VISION_MAX_DPI = 150.0
+PDF_VISION_MAX_PIXELS = 20_000_000
+PDF_VISION_JPEG_QUALITIES = (80, 75, 70, 65, 60)
+PDF_VISION_MAX_REQUEST_CHARS = 1_000_000
+PDF_VISION_REQUEST_OVERHEAD_CHARS = 100_000
+PDF_VISION_MAX_QUESTION_CHARS = 40_000
+PDF_VISION_DATA_URL_PREFIX = "data:image/jpeg;base64,"
+PDF_VISION_MAX_DATA_URL_CHARS = (
+    PDF_VISION_MAX_REQUEST_CHARS - PDF_VISION_REQUEST_OVERHEAD_CHARS
+)
+PDF_VISION_MAX_BASE64_CHARS = (
+    (PDF_VISION_MAX_DATA_URL_CHARS - len(PDF_VISION_DATA_URL_PREFIX)) // 4
+) * 4
+PDF_VISION_MAX_JPEG_BYTES = PDF_VISION_MAX_BASE64_CHARS // 4 * 3
+PDF_VISION_MAX_PAGES_PER_BATCH = 3
+PDF_VISION_QUESTION_MAX_PAGES = 5
+PDF_VISION_SCAN_COVERAGE_THRESHOLD = 0.80
+PDF_VISION_SCAN_MIN_PIXELS = 500_000
 
 
 PDF_OCR_PROMPT = """You are an OCR assistant. Extract all body text from the provided document image and output pure Markdown in the document's own language.
@@ -201,15 +223,14 @@ class PdfPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body = await self._read_bytes(storage, ctx.storage_key)
-        # pypdf page-count and per-page layout text extraction are pure-CPU
-        # and can take tens of seconds on large PDFs — offload them so the
-        # event loop and worker heartbeats stay responsive.
-        total_pages = await asyncio.to_thread(self._page_count, body)
-        text_index_pages = min(total_pages, PDF_TEXT_MAX_INDEX_PAGES)
-        text_per_page = await asyncio.to_thread(
-            self._extract_text, body, max_pages=text_index_pages,
-        )
+        with measure_stage("extraction"):
+            body = await self._read_bytes(storage, ctx.storage_key)
+            # Keep CPU-heavy page parsing off the event loop.
+            total_pages = await asyncio.to_thread(self._page_count, body)
+            text_index_pages = min(total_pages, PDF_TEXT_MAX_INDEX_PAGES)
+            text_per_page = await asyncio.to_thread(
+                self._extract_text, body, max_pages=text_index_pages,
+            )
 
         vlm_available = has_vision_profile()
 
@@ -237,7 +258,8 @@ class PdfPipeline(Pipeline):
                 avg_chars,
             )
             ocr_used = True
-            ocr_text_per_page = await _ocr_pdf_pages(body, total_pages)
+            with measure_stage("vision"):
+                ocr_text_per_page = await _ocr_pdf_pages(body, total_pages)
             ocr_pages_done = sum(1 for t in ocr_text_per_page if t.strip())
             if ocr_pages_done == 0:
                 raise PdfNeedsOcrError(
@@ -264,13 +286,28 @@ class PdfPipeline(Pipeline):
         if ocr_used or not vlm_available:
             described = []
         else:
-            images = await asyncio.to_thread(
-                extract_images, body, max_pages=indexed_pages,
-            )
-            described = await describe_images(images) if images else []
+            with measure_stage("vision"):
+                images = await asyncio.to_thread(
+                    extract_images, body, max_pages=indexed_pages,
+                )
+                described = await describe_images(images) if images else []
 
-        if self._needs_chunked_index(text_per_page[:indexed_pages], described):
-            return await self._run_chunked_index(
+        with measure_stage("intelligence"):
+            if self._needs_chunked_index(text_per_page[:indexed_pages], described):
+                return await self._run_chunked_index(
+                    ctx=ctx,
+                    text_per_page=text_per_page[:indexed_pages],
+                    described=described,
+                    total_pages=total_pages,
+                    indexed_pages=indexed_pages,
+                    ocr_used=ocr_used,
+                    ocr_pages_done=ocr_pages_done,
+                    partial_reasons=partial_reasons,
+                    ocr_pages=ocr_pages_for_storage,
+                    ocr_document_type=ocr_document_type,
+                )
+
+            return await self._run_single_index(
                 ctx=ctx,
                 text_per_page=text_per_page[:indexed_pages],
                 described=described,
@@ -282,19 +319,6 @@ class PdfPipeline(Pipeline):
                 ocr_pages=ocr_pages_for_storage,
                 ocr_document_type=ocr_document_type,
             )
-
-        return await self._run_single_index(
-            ctx=ctx,
-            text_per_page=text_per_page[:indexed_pages],
-            described=described,
-            total_pages=total_pages,
-            indexed_pages=indexed_pages,
-            ocr_used=ocr_used,
-            ocr_pages_done=ocr_pages_done,
-            partial_reasons=partial_reasons,
-            ocr_pages=ocr_pages_for_storage,
-            ocr_document_type=ocr_document_type,
-        )
 
     @staticmethod
     async def _read_bytes(
@@ -383,7 +407,7 @@ class PdfPipeline(Pipeline):
         )
 
         client = get_chat_client("ingest")
-        max_out = min(8192, max(2048, len(body_for_index) // 8))
+        max_out = ingest_output_tokens(len(body_for_index))
         resp = await client.complete(ChatRequest(
             system=PDF_PIPELINE_SYSTEM,
             messages=cacheable_prompt_messages(stable_prefix, file_content),
@@ -478,7 +502,7 @@ class PdfPipeline(Pipeline):
                 resp = await client.complete(ChatRequest(
                     system=PDF_CHUNK_SYSTEM,
                     messages=cacheable_prompt_messages(stable_prefix, file_content),
-                    max_tokens=min(8192, max(2048, len(rendered) // 8)),
+                    max_tokens=ingest_output_tokens(len(rendered)),
                     temperature=0.2,
                     cache_breakpoints=[0],
                 ))
@@ -563,7 +587,7 @@ class PdfPipeline(Pipeline):
                 ),
                 aggregate_content,
             ),
-            max_tokens=8192,
+            max_tokens=ingest_output_tokens(len(aggregate_content)),
             temperature=0.2,
             cache_breakpoints=[0],
         ))
@@ -710,29 +734,33 @@ class PdfPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
-        """Two paths, picked by whether this PDF was OCR-indexed at
-        ingest and whether the agent passed `question`:
-
-        * description.ocr present + question set → render the requested
-          pages to JPEG and ask the VLM the question directly. The
-          ingest-time OCR text was lossy by definition; for an actual
-          query, sending pixels to the VLM is closer to what was
-          originally on the page.
-        * description.ocr present + no question: read
-          from stored OCR page/block text captured at ingest.
-        * otherwise (text-layer PDFs) → existing behaviour: pypdf text
-          extraction + page/pattern slicing.
-        """
+        """Read source or stored OCR text before using bounded page vision."""
         is_ocr_pdf = _file_was_ocr_indexed(file_row)
         question = (args.get("question") or "").strip() if isinstance(args, dict) else ""
+        pdf_bytes: bytes | None = None
         if is_ocr_pdf:
-            if not question:
-                return self._slice_ocr_text(file_row, args)
-            return await self._answer_with_vlm(
-                file_row=file_row, question=question, args=args, storage=storage,
+            source_result = self._slice_ocr_text(file_row, args)
+        else:
+            pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
+            source_result = self._slice(pdf_bytes, args, file_row=file_row)
+        if not question:
+            return source_result
+        if _has_meaningful_pdf_text(source_result.text):
+            source_answer = prefer_source_text_for_question(
+                source_result,
+                mode="pdf_ocr_question" if is_ocr_pdf else "pdf_text_question",
+                question=question,
+                answered_by="persisted_pdf_ocr" if is_ocr_pdf else "pdf_text_layer",
             )
-        pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
-        return self._slice(pdf_bytes, args, file_row=file_row)
+            if source_answer is not None:
+                return source_answer
+        return await self._answer_with_vlm(
+            file_row=file_row,
+            question=question,
+            args=args,
+            storage=storage,
+            pdf_bytes=pdf_bytes,
+        )
 
     async def _answer_with_vlm(
         self,
@@ -741,18 +769,24 @@ class PdfPipeline(Pipeline):
         question: str,
         args: dict[str, Any],
         storage: StorageBackend,
+        pdf_bytes: bytes | None = None,
     ) -> SegmentResult:
         """Render the requested page range to JPEGs and ask the VLM."""
+        ocr_indexed = _file_was_ocr_indexed(file_row)
+        base_extras: dict[str, Any] = {"kind": "pdf"}
+        if ocr_indexed:
+            base_extras["ocr_indexed"] = True
         if not has_vision_profile():
             return SegmentResult(error=(
-                "OCR PDF read with `question` requires the `vision` LLM "
-                "profile; configure it before retrying"
-            ), extras={"kind": "pdf", "ocr_indexed": True})
-        try:
-            pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
-        except Exception as exc:  # noqa: BLE001
-            return SegmentResult(error=f"PDF read failed: {exc}",
-                                 extras={"kind": "pdf"})
+                "PDF has no readable text in the requested range and visual "
+                "inspection requires the `vision` LLM profile"
+            ), extras=base_extras)
+        if pdf_bytes is None:
+            try:
+                pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
+            except Exception as exc:  # noqa: BLE001
+                return SegmentResult(error=f"PDF read failed: {exc}",
+                                     extras=base_extras)
 
         # Page selection: explicit page_start/page_end if given, else the
         # first PDF_READ_MAX_PAGES_PER_CALL pages. This is an ad-hoc VLM read,
@@ -775,71 +809,91 @@ class PdfPipeline(Pipeline):
                 return SegmentResult(error="page_start/page_end must be integers")
         else:
             ps, pe = 1, min(
-                total_pages or PDF_READ_MAX_PAGES_PER_CALL,
-                PDF_READ_MAX_PAGES_PER_CALL,
+                total_pages or PDF_VISION_QUESTION_MAX_PAGES,
+                PDF_VISION_QUESTION_MAX_PAGES,
             )
-        pe = min(pe, ps + PDF_READ_MAX_PAGES_PER_CALL - 1)
+        requested_pe = pe
+        pe = min(pe, ps + PDF_VISION_QUESTION_MAX_PAGES - 1)
 
-        # Render pages [1..pe], then drop everything before ps. The
-        # underlying renderer takes a leading page_count, so we render
-        # up to pe and slice — the cost difference vs adding a start
-        # offset to the helper isn't worth a signature change here.
+        # Render only the selected range. A late-page question must not render
+        # every earlier page merely to discard it afterwards.
         try:
-            jpegs_all = await asyncio.to_thread(
-                _render_pdf_pages_to_jpeg, pdf_bytes, pe,
+            jpegs = await asyncio.to_thread(
+                _render_pdf_pages_to_jpeg,
+                pdf_bytes,
+                pe - ps + 1,
+                start_page=ps - 1,
+                dpi=PDF_VISION_MAX_DPI,
             )
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"PDF render failed: {exc}",
-                                 extras={"kind": "pdf"})
-        jpegs = jpegs_all[ps - 1: pe]
+                                 extras=base_extras)
         if not jpegs:
             return SegmentResult(error="no pages rendered",
-                                 extras={"kind": "pdf"})
+                                 extras=base_extras)
 
-        content: list[Any] = [TextBlock(text=(
-            f"Question: {question}\n\n"
-            f"You are looking at pages {ps}-{ps + len(jpegs) - 1} of a "
-            f"scanned PDF. Answer the question concisely, ground every "
-            f"claim in what is visible, cite the page number when useful. "
-            f"If the answer isn't on these pages, say so plainly."
-        ))]
+        bounded_question = _bounded_pdf_vision_question(question)
+        prepared_pages: list[tuple[int, bytes]] = []
         for offset, jpeg in enumerate(jpegs):
-            scaled, media_type = downscale_for_vlm(
+            prepared = downscale_for_vlm(
                 jpeg, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
             )
-            content.append(TextBlock(text=f"Page {ps + offset}:"))
-            content.append(ImageBlock(
-                media_type=media_type,
-                data_b64=base64.b64encode(scaled).decode("ascii"),
-            ))
+            if prepared is None:
+                continue
+            scaled, _media_type = prepared
+            try:
+                bounded_jpeg = _fit_pdf_vision_jpeg_budget(scaled)
+            except Exception as exc:  # noqa: BLE001 - malformed page image
+                log.warning("PDF page %d could not fit vision budget: %s", ps + offset, exc)
+                continue
+            prepared_pages.append((ps + offset, bounded_jpeg))
+
+        if not prepared_pages:
+            return SegmentResult(
+                error="no PDF pages could be prepared for the vision model",
+                extras=base_extras,
+            )
 
         client = get_chat_client("vision")
         try:
-            resp = await client.complete(ChatRequest(
-                system=(
-                    "You answer questions about scanned document pages. "
-                    "Be concise and ground every claim in what is visible."
-                ),
-                messages=[ChatMessage(role="user", content=content)],
-                max_tokens=2048,
-                temperature=0.2,
-            ))
+            answers, batch_count, used_single_page_fallback = (
+                await _answer_pdf_question_pages(
+                    client=client,
+                    pages=prepared_pages,
+                    question=bounded_question,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"VLM call failed: {exc}",
-                                 extras={"kind": "pdf", "ocr_indexed": True})
-        text = (resp.text or "").strip()
-        return SegmentResult(
-            text=text or "(VLM returned empty response)",
-            extras={
-                "kind": "pdf",
-                "ocr_indexed": True,
-                "vlm_used": True,
-                "question": question,
-                "page_start": ps,
-                "page_end": ps + len(jpegs) - 1,
-                "pages_sent": len(jpegs),
-            },
-        )
+                                 extras=base_extras)
+        text = "\n\n".join(answers).strip()
+        extras: dict[str, Any] = {
+            **base_extras,
+            "vlm_used": True,
+            "question": bounded_question,
+            "page_start": prepared_pages[0][0],
+            "page_end": prepared_pages[-1][0],
+            "pages_sent": len(prepared_pages),
+            "vision_batches": batch_count,
+        }
+        if used_single_page_fallback:
+            extras["multi_image_fallback"] = True
+        if bounded_question != question.strip():
+            extras["question_truncated"] = True
+            extras["question_serialized_char_limit"] = PDF_VISION_MAX_QUESTION_CHARS
+        if pe < requested_pe:
+            extras["window_truncated"] = True
+            extras["requested_page_end"] = requested_pe
+            extras["warning"] = (
+                "PDF vision question reads are capped at "
+                f"{PDF_VISION_QUESTION_MAX_PAGES} pages per call"
+            )
+        if not text:
+            return SegmentResult(
+                error="vision model returned no PDF answer",
+                extras=extras,
+            )
+        return SegmentResult(text=text, extras=extras)
 
     def _slice_ocr_text(
         self,
@@ -1389,6 +1443,21 @@ def _clean_ocr_response_text(text: str | None) -> str:
     return clean
 
 
+def _has_meaningful_pdf_text(text: str) -> bool:
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line == "(no OCR text on this page)":
+            continue
+        if re.fullmatch(r"\[Page \d+\]", line):
+            continue
+        if re.fullmatch(r"\[Page label: .+\]", line):
+            continue
+        if line.startswith("[page extraction failed:") and line.endswith("]"):
+            continue
+        return True
+    return False
+
+
 def _file_was_ocr_indexed(file_row: Any) -> bool:
     """True iff the ingest pipeline marked this PDF as OCR-only.
 
@@ -1535,6 +1604,154 @@ def _add_ocr_window_extras(
         extras["requested_page_end"] = window.requested_page_end
 
 
+async def _answer_pdf_question_pages(
+    *,
+    client: Any,
+    pages: list[tuple[int, bytes]],
+    question: str,
+) -> tuple[list[str], int, bool]:
+    """Query bounded page batches, falling back only for multi-image incompatibility."""
+    answers: list[str] = []
+    request_count = 0
+    multi_image_supported = True
+    used_single_page_fallback = False
+
+    async def complete(batch: list[tuple[int, bytes]]) -> None:
+        nonlocal request_count
+        request_count += 1
+        response = await _complete_pdf_question_batch(
+            client=client,
+            batch=batch,
+            question=question,
+        )
+        text = (response.text or "").strip()
+        if not text:
+            return
+        if len(batch) == 1 and f"[Page {batch[0][0]}]" not in text:
+            text = f"[Page {batch[0][0]}]\n{text}"
+        answers.append(text)
+
+    for batch in _pdf_vision_page_batches(pages):
+        if len(batch) == 1 or not multi_image_supported:
+            for page in batch:
+                await complete([page])
+            continue
+        try:
+            await complete(batch)
+        except Exception as exc:  # noqa: BLE001 - SDK/provider types vary
+            if not _pdf_vision_multi_image_incompatible(exc):
+                raise
+            multi_image_supported = False
+            used_single_page_fallback = True
+            log.warning(
+                "multi-page PDF vision query was rejected for pages %s; "
+                "falling back to single-page calls: %s",
+                [page_no for page_no, _jpeg in batch],
+                exc,
+            )
+            for page in batch:
+                await complete([page])
+
+    return answers, request_count, used_single_page_fallback
+
+
+async def _complete_pdf_question_batch(
+    *,
+    client: Any,
+    batch: list[tuple[int, bytes]],
+    question: str,
+) -> Any:
+    content: list[Any] = [TextBlock(text=(
+        f"Question: {question}\n\n"
+        "The following scanned PDF page images are labeled in order. Answer "
+        "the question for every page using only visible evidence. Use one "
+        "[Page N] heading per page and quote visible text when relevant. If "
+        "the answer is absent, say so plainly."
+    ))]
+    for page_no, jpeg in batch:
+        content.append(TextBlock(text=f"PDF page {page_no}:"))
+        content.append(ImageBlock(
+            media_type="image/jpeg",
+            data_b64=base64.b64encode(jpeg).decode("ascii"),
+        ))
+    return await client.complete(ChatRequest(
+        system=(
+            "Answer questions about scanned document pages using only visible "
+            "evidence. Keep evidence from different pages separated."
+        ),
+        messages=[ChatMessage(role="user", content=content)],
+        max_tokens=min(8_192, 2_048 * len(batch)),
+        temperature=0.2,
+    ))
+
+
+def _pdf_vision_multi_image_incompatible(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {400, 413, 415, 422}:
+        return True
+    name = type(exc).__name__.lower()
+    if "badrequest" in name or "unsupportedmedia" in name:
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "does not accept multiple images",
+        "doesn't accept multiple images",
+        "multiple images are not supported",
+        "multiple image inputs are not supported",
+        "multi-image is not supported",
+        "multi image is not supported",
+        "too many images",
+        "image count",
+    ))
+
+
+def _bounded_pdf_vision_question(question: str) -> str:
+    text = str(question or "").strip()
+    if _json_string_chars(text) <= PDF_VISION_MAX_QUESTION_CHARS:
+        return text
+    lower = 0
+    upper = len(text)
+    while lower < upper:
+        midpoint = (lower + upper + 1) // 2
+        if _json_string_chars(text[:midpoint]) <= PDF_VISION_MAX_QUESTION_CHARS:
+            lower = midpoint
+        else:
+            upper = midpoint - 1
+    log.warning(
+        "PDF vision question exceeded %d serialized characters and was truncated",
+        PDF_VISION_MAX_QUESTION_CHARS,
+    )
+    return text[:lower]
+
+
+def _json_string_chars(text: str) -> int:
+    return max(0, len(json.dumps(text, ensure_ascii=True)) - 2)
+
+
+def _pdf_vision_page_batches(
+    pages: list[tuple[int, bytes]],
+) -> list[list[tuple[int, bytes]]]:
+    batches: list[list[tuple[int, bytes]]] = []
+    current: list[tuple[int, bytes]] = []
+    current_chars = 0
+    for page in pages:
+        page_chars = _pdf_vision_data_url_chars(page[1])
+        if page_chars > PDF_VISION_MAX_DATA_URL_CHARS:
+            raise ValueError("PDF vision page exceeds request image budget")
+        if current and (
+            len(current) >= PDF_VISION_MAX_PAGES_PER_BATCH
+            or current_chars + page_chars > PDF_VISION_MAX_DATA_URL_CHARS
+        ):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(page)
+        current_chars += page_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
 async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
     """Render OCR pages to JPEG via pypdfium2,
     down-scale each via downscale_for_vlm, and ask the vision profile
@@ -1604,14 +1821,17 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
 
 
 def _render_pdf_pages_to_jpeg(
-    pdf_bytes: bytes, page_count: int, *, start_page: int = 0,
+    pdf_bytes: bytes,
+    page_count: int,
+    *,
+    start_page: int = 0,
+    dpi: float = OCR_RENDER_DPI,
 ) -> list[bytes]:
     """Render `page_count` pages to JPEG bytes. Sync, intended to run
     inside asyncio.to_thread. Mirrors WeKnora's PDFScannedParser shape:
     pypdfium2 → PIL.Image → JPEG via Pillow."""
     import pypdfium2 as pdfium
 
-    scale = OCR_RENDER_DPI / 72
     out: list[bytes] = []
     pdf = pdfium.PdfDocument(pdf_bytes)
     try:
@@ -1619,20 +1839,9 @@ def _render_pdf_pages_to_jpeg(
         end = min(start + page_count, len(pdf))
         for i in range(start, end):
             page = pdf[i]
-            bitmap = None
             try:
-                bitmap = page.render(scale=scale)
-                img = bitmap.to_pil()
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=85, optimize=True)
-                out.append(buf.getvalue())
+                out.append(_render_pdf_page_to_vision_jpeg(page, max_dpi=dpi))
             finally:
-                if bitmap is not None:
-                    close = getattr(bitmap, "close", None)
-                    if close:
-                        close()
                 close = getattr(page, "close", None)
                 if close:
                     close()
@@ -1641,6 +1850,207 @@ def _render_pdf_pages_to_jpeg(
         if close:
             close()
     return out
+
+
+def _render_pdf_page_to_vision_jpeg(
+    page: Any,
+    *,
+    max_dpi: float = PDF_VISION_MAX_DPI,
+) -> bytes:
+    scale = _pdf_vision_render_scale(page, max_dpi=max_dpi)
+    bitmap = None
+    image = None
+    try:
+        bitmap = page.render(scale=scale)
+        image = bitmap.to_pil()
+        image.load()
+        return _encode_pdf_vision_jpeg(image, effective_dpi=scale * 72.0)
+    finally:
+        if image is not None:
+            close = getattr(image, "close", None)
+            if close:
+                close()
+        if bitmap is not None:
+            close = getattr(bitmap, "close", None)
+            if close:
+                close()
+
+
+def _pdf_vision_render_scale(
+    page: Any,
+    *,
+    max_dpi: float = PDF_VISION_MAX_DPI,
+) -> float:
+    page_width, page_height = page.get_size()
+    if page_width <= 0 or page_height <= 0:
+        raise ValueError("PDF page has invalid dimensions")
+    scale = max(1.0, float(max_dpi)) / 72.0
+    page_area = page_width * page_height
+    if page_area * scale * scale > PDF_VISION_MAX_PIXELS:
+        scale = min(scale, math.sqrt(PDF_VISION_MAX_PIXELS / page_area))
+    scan_cap = _dominant_pdf_scan_scale_cap(
+        page,
+        page_width=page_width,
+        page_height=page_height,
+    )
+    if scan_cap is not None:
+        scale = min(scale, scan_cap)
+    return max(scale, 1e-6)
+
+
+def _dominant_pdf_scan_scale_cap(
+    page: Any,
+    *,
+    page_width: float,
+    page_height: float,
+) -> float | None:
+    try:
+        from pypdfium2 import raw as pdfium_c
+    except ImportError:  # pragma: no cover - packaged dependency
+        return None
+    try:
+        left, bottom, right, top = page.get_bbox()
+        page_area = abs((right - left) * (top - bottom))
+    except Exception as exc:  # noqa: BLE001 - malformed page boxes degrade
+        log.debug("could not inspect PDF page bounding box: %r", exc)
+        return None
+    if page_area <= 0:
+        return None
+    caps: list[float] = []
+    try:
+        images = page.get_objects(
+            filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE],
+            max_depth=15,
+        )
+        for image in images:
+            try:
+                matrix = _full_pdf_object_matrix(image)
+                placed_x = math.hypot(matrix.a, matrix.b)
+                placed_y = math.hypot(matrix.c, matrix.d)
+                placed_area = abs(matrix.a * matrix.d - matrix.b * matrix.c)
+                if placed_x <= 0 or placed_y <= 0 or placed_area <= 0:
+                    continue
+                pixel_width, pixel_height = image.get_px_size()
+                if (
+                    placed_area / page_area < PDF_VISION_SCAN_COVERAGE_THRESHOLD
+                    or pixel_width <= 0
+                    or pixel_height <= 0
+                    or pixel_width * pixel_height < PDF_VISION_SCAN_MIN_PIXELS
+                ):
+                    continue
+                page_short, page_long = sorted((page_width, page_height))
+                pixel_short, pixel_long = sorted((pixel_width, pixel_height))
+                caps.append(min(
+                    max(0.5, pixel_width - 0.5) / placed_x,
+                    max(0.5, pixel_height - 0.5) / placed_y,
+                    max(0.5, pixel_short - 0.5) / page_short,
+                    max(0.5, pixel_long - 0.5) / page_long,
+                ))
+            except Exception as exc:  # noqa: BLE001 - malformed images degrade
+                log.debug("could not inspect PDF image scale cap: %r", exc)
+    except Exception as exc:  # noqa: BLE001 - vector pages may expose no objects
+        log.debug("could not enumerate PDF image objects: %r", exc)
+    return min(caps) if caps else None
+
+
+def _full_pdf_object_matrix(obj: Any) -> Any:
+    matrix = obj.get_matrix()
+    parent = getattr(obj, "container", None)
+    while parent is not None:
+        matrix = matrix.multiply(parent.get_matrix())
+        parent = getattr(parent, "container", None)
+    return matrix
+
+
+def _fit_pdf_vision_jpeg_budget(jpeg: bytes) -> bytes:
+    if _pdf_vision_data_url_chars(jpeg) <= PDF_VISION_MAX_DATA_URL_CHARS:
+        return jpeg
+    from PIL import Image
+
+    with Image.open(io.BytesIO(jpeg)) as image:
+        image.load()
+        return _encode_pdf_vision_jpeg(image, effective_dpi=0.0)
+
+
+def _encode_pdf_vision_jpeg(image: Any, *, effective_dpi: float) -> bytes:
+    from PIL import Image
+
+    current = _pdf_vision_rgb_image(image)
+    current_dpi = max(0.0, float(effective_dpi or 0.0))
+    try:
+        while True:
+            smallest: bytes | None = None
+            for quality in PDF_VISION_JPEG_QUALITIES:
+                encoded = _encode_pdf_vision_jpeg_once(
+                    current,
+                    quality=quality,
+                    effective_dpi=current_dpi,
+                )
+                if _pdf_vision_data_url_chars(encoded) <= PDF_VISION_MAX_DATA_URL_CHARS:
+                    return encoded
+                smallest = encoded
+            width, height = current.size
+            if width <= 1 and height <= 1:
+                raise RuntimeError("could not fit PDF vision JPEG within request budget")
+            assert smallest is not None
+            estimated_ratio = math.sqrt(PDF_VISION_MAX_JPEG_BYTES / len(smallest)) * 0.95
+            resize_ratio = min(0.90, max(0.10, estimated_ratio))
+            new_size = (
+                max(1, int(width * resize_ratio)),
+                max(1, int(height * resize_ratio)),
+            )
+            if new_size == current.size:
+                new_size = (max(1, width - 1), max(1, height - 1))
+            resized = current.resize(new_size, Image.Resampling.LANCZOS)
+            linear_ratio = min(
+                resized.width / max(1, width),
+                resized.height / max(1, height),
+            )
+            current.close()
+            current = resized
+            current_dpi *= linear_ratio
+    finally:
+        current.close()
+
+
+def _pdf_vision_rgb_image(image: Any) -> Any:
+    from PIL import Image
+
+    if image.mode == "RGB":
+        return image.copy()
+    if image.mode in {"RGBA", "LA"} or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        try:
+            background.paste(rgba, mask=rgba.getchannel("A"))
+        finally:
+            rgba.close()
+        return background
+    return image.convert("RGB")
+
+
+def _encode_pdf_vision_jpeg_once(
+    image: Any,
+    *,
+    quality: int,
+    effective_dpi: float,
+) -> bytes:
+    buf = io.BytesIO()
+    kwargs: dict[str, Any] = {
+        "format": "JPEG",
+        "quality": quality,
+        "optimize": True,
+    }
+    if effective_dpi > 0:
+        kwargs["dpi"] = (effective_dpi, effective_dpi)
+    image.save(buf, **kwargs)
+    return buf.getvalue()
+
+
+def _pdf_vision_data_url_chars(jpeg: bytes) -> int:
+    return len(PDF_VISION_DATA_URL_PREFIX) + 4 * math.ceil(len(jpeg) / 3)
 
 
 @dataclass(slots=True)

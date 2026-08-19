@@ -296,10 +296,14 @@ export type BulkReprocessFilter =
   | { status: IngestStatus };
 
 export interface BulkReprocessResult {
+  dispatcher_task_id: string;
   file_count: number;
   task_ids: string[];
+  reused: boolean;
   reused_count: number;
   skipped_count: number;
+  scope: string;
+  status: "scheduled";
   status_filter?: IngestStatus | null;
 }
 
@@ -517,6 +521,16 @@ export interface LlmTestResult {
   provider?: string;
   error?: string;
   configured?: boolean;
+  duration_ms?: number;
+  mode?: "text" | "image";
+  dimensions?: number;
+}
+
+export interface ModelDiagnosticsResult {
+  profiles: Record<string, LlmTestResult>;
+  embedding: LlmTestResult;
+  rerank: LlmTestResult;
+  duration_ms: number;
 }
 
 export const settings = {
@@ -532,10 +546,9 @@ export const settings = {
       method: "PUT",
       body: JSON.stringify({ patch, replace: false }),
     }),
-  /** Probe every resolved LLM profile with a 1-token chat call so a mistyped
-   *  key / base-URL / model is caught at config time. */
+  /** Probe every resolved LLM profile plus enabled embedding/rerank providers. */
   testLlm: () =>
-    _request<{ profiles: Record<string, LlmTestResult> }>(
+    _request<ModelDiagnosticsResult>(
       `/v1/settings/llm/test`,
       { method: "POST" },
     ),

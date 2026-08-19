@@ -13,13 +13,17 @@ from marginalia.db.models import File, FileEntry
 
 
 async def get_by_sha256(db: AsyncSession, sha256: str) -> File | None:
-    """Live or soft-deleted file row matching the content hash. Used by
-    upload to detect dedup hits before a tentative storage put is finalised."""
+    """Oldest live file row matching the content hash.
+
+    Soft-deleted rows deliberately do not participate in upload deduplication:
+    a replacement upload must own a live storage object and a fresh lifecycle
+    instead of reviving a row that is already awaiting purge.
+    """
     return (
         await db.execute(
             select(File)
-            .where(File.sha256 == sha256)
-            .order_by(File.deleted_at.isnot(None), File.created_at.asc())
+            .where(File.sha256 == sha256, File.deleted_at.is_(None))
+            .order_by(File.created_at.asc())
             .limit(1)
         )
     ).scalar_one_or_none()

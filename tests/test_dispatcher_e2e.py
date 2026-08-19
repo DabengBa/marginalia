@@ -46,9 +46,11 @@ from marginalia.db.models import AuditEvent, Base
 from marginalia.db.models.tasks import Task
 from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.handlers.periodic_tick import (
+    TICK_INTERVAL_SECONDS,
     bootstrap_periodic_tick,
     handle_periodic_tick,
     KIND_PERIODIC_TICK,
+    periodic_tick_dedup_key,
 )
 from marginalia.tasks.handlers.prune import handle_prune
 from marginalia.tasks.handlers.recover_stuck_tasks import handle_recover_stuck_tasks
@@ -62,6 +64,16 @@ from marginalia.utils.ids import new_id
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def test_periodic_tick_dedup_key_uses_time_slots() -> None:
+    slot_start = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    assert periodic_tick_dedup_key(slot_start) == periodic_tick_dedup_key(
+        slot_start + timedelta(seconds=TICK_INTERVAL_SECONDS - 1)
+    )
+    assert periodic_tick_dedup_key(slot_start) != periodic_tick_dedup_key(
+        slot_start + timedelta(seconds=TICK_INTERVAL_SECONDS)
+    )
 
 
 async def _create_schema() -> None:
@@ -81,7 +93,7 @@ async def main():
             select(Task).where(Task.kind == KIND_PERIODIC_TICK)
         )).scalars().all()
         assert len(ticks) == 1
-        assert ticks[0].dedup_key == KIND_PERIODIC_TICK
+        assert ticks[0].dedup_key.startswith(f"{KIND_PERIODIC_TICK}:")
         bootstrap_id = ticks[0].id
     print("[1] bootstrap created 1 tick row:", bootstrap_id)
 
@@ -107,21 +119,19 @@ async def main():
     expected = set(PERIODIC_INTERVALS.keys())
     assert kinds_dispatched == expected, f"missing: {expected - kinds_dispatched}, extra: {kinds_dispatched - expected}"
 
-    # tick row scheduling: one row should be the just-completed bootstrap (mark
-    # it done so we can verify the next behavior); a fresh tick row should be
-    # scheduled in the future
+    # The bootstrap fixture remains pending because the handler is invoked
+    # directly, while a distinct time-slot key creates its future successor.
     async with factory() as s:
         ticks = (await s.execute(
             select(Task).where(Task.kind == KIND_PERIODIC_TICK)
             .order_by(Task.created_at)
         )).scalars().all()
     print("[2] tick rows after run:", [(t.id, t.status, t.scheduled_at) for t in ticks])
-    # 1 bootstrap (still pending — handler doesn't mark itself done) + 1 future
     pending_ticks = [t for t in ticks if t.status == "pending"]
-    # The handler enqueued a future tick with dedup_key=periodic_tick. Because
-    # the bootstrap tick is also pending with the same dedup_key, enqueue()
-    # actually returned the existing one and did NOT insert a new row.
-    assert len(pending_ticks) == 1, f"unexpected pending tick count: {len(pending_ticks)}"
+    assert len(pending_ticks) == 2, f"unexpected pending tick count: {len(pending_ticks)}"
+    future_tick = max(pending_ticks, key=lambda tick: tick.scheduled_at)
+    assert len({tick.dedup_key for tick in pending_ticks}) == 2
+    assert future_tick.dedup_key == periodic_tick_dedup_key(future_tick.scheduled_at)
 
     # --- 3. running tick a 2nd time within interval should NOT re-dispatch -
     # Mark all dispatched periodic-kind rows as done so freshness check kicks in.

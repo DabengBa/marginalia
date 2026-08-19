@@ -168,6 +168,10 @@ function OfficeViewerToolbar({
 }
 
 type DocxDocumentInstance = import("@silurus/ooxml/docx").DocxDocument;
+type DocxBodyElement = import("@silurus/ooxml/docx").BodyElement;
+type DocxParagraph = import("@silurus/ooxml/docx").DocParagraph;
+type DocxTable = import("@silurus/ooxml/docx").DocTable;
+type DocxCellElement = import("@silurus/ooxml/docx").CellElement;
 type PptxViewerInstance = import("@silurus/ooxml/pptx").PptxViewer;
 type PptxPresentationInstance = import("@silurus/ooxml/pptx").PptxPresentation;
 type PptxPresentationData = import("@silurus/ooxml/pptx").Presentation;
@@ -175,6 +179,8 @@ type PptxSlide = import("@silurus/ooxml/pptx").Slide;
 type PptxTextBody = import("@silurus/ooxml/pptx").TextBody;
 type PptxChartElement = import("@silurus/ooxml/pptx").ChartElement;
 type XlsxViewerInstance = import("@silurus/ooxml/xlsx").XlsxViewer;
+type XlsxWorkbookInstance = import("@silurus/ooxml/xlsx").XlsxWorkbook;
+type XlsxCellValue = import("@silurus/ooxml/xlsx").CellValue;
 type OoxmlViewerInstance =
   | PptxViewerInstance
   | XlsxViewerInstance;
@@ -184,6 +190,17 @@ type PptxPresentationInternal = {
 
 type PptxViewerInternal = {
   engine?: PptxPresentationInstance | null;
+};
+
+type XlsxViewerInternal = {
+  wb?: XlsxWorkbookInstance | null;
+  getCellRect?: (row: number, col: number) => {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } | null;
+  scrollHost?: HTMLElement;
 };
 
 interface PptxSlideSearchEntry {
@@ -221,13 +238,29 @@ function waitForNextFrame(): Promise<void> {
   return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
-export function OfficeDocumentView({ url, format, name, downloadUrl, quote, page, onScrolled }: {
+export function OfficeDocumentView({
+  url,
+  format,
+  name,
+  downloadUrl,
+  quote,
+  page,
+  block,
+  sheet,
+  cell,
+  row,
+  onScrolled,
+}: {
   url: string;
   format: OfficeKind;
   name: string;
   downloadUrl: string;
   quote: string | null;
   page: number | null;
+  block: number | null;
+  sheet: string | null;
+  cell: string | null;
+  row: number | null;
   onScrolled?: () => void;
 }) {
   // Token-protected backends reject the ooxml loaders' internal fetch;
@@ -243,6 +276,7 @@ export function OfficeDocumentView({ url, format, name, downloadUrl, quote, page
         name={name}
         downloadUrl={downloadUrl}
         quote={quote}
+        block={block}
         onScrolled={onScrolled}
       />
     );
@@ -255,15 +289,19 @@ export function OfficeDocumentView({ url, format, name, downloadUrl, quote, page
       downloadUrl={downloadUrl}
       quote={quote}
       page={format === "pptx" ? page : null}
+      sheet={format === "xlsx" ? sheet : null}
+      cell={format === "xlsx" ? cell : null}
+      row={format === "xlsx" ? row : null}
       onScrolled={onScrolled}
     />
   );
 }
-function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
+function DocxScrollView({ url, name, downloadUrl, quote, block, onScrolled }: {
   url: string;
   name: string;
   downloadUrl: string;
   quote: string | null;
+  block: number | null;
   onScrolled?: () => void;
 }) {
   const { t } = useI18n();
@@ -283,6 +321,7 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
   const [fitMode, setFitMode] = useState<DocxFitMode>("none");
   const [renderRequestZoom, setRenderRequestZoom] = useState(1);
   const [renderKey, setRenderKey] = useState(0);
+  const [blockContext, setBlockContext] = useState<string | null>(null);
 
   const updateCurrentPageFromViewport = () => {
     const root = scrollRef.current;
@@ -386,8 +425,17 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
     ready && renderKey > 0 ? `docx:${url}:${renderKey}` : null,
     quote,
     onScrolled,
-    { allowMissing: initialRenderComplete, consumeOnMissing: initialRenderComplete },
+    {
+      allowMissing: initialRenderComplete,
+      consumeOnMissing: initialRenderComplete,
+      context: blockContext,
+    },
   );
+
+  useEffect(() => {
+    const doc = docRef.current;
+    setBlockContext(doc && block ? docxBlockTextAt(doc, block) : null);
+  }, [block, ready]);
 
   useEffect(() => {
     let cancelled = false;
@@ -402,6 +450,7 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
     setRenderedPageCount(0);
     setRenderRequestZoom(1);
     setRenderKey(0);
+    setBlockContext(null);
     rasterZoomRef.current = 1;
     pageRefs.current = [];
     docRef.current?.destroy();
@@ -806,13 +855,27 @@ function writePrintDocument(
     doc.body.appendChild(img);
   }
 }
-function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: {
+function OoxmlView({
+  url,
+  format,
+  name,
+  downloadUrl,
+  quote,
+  page,
+  sheet,
+  cell,
+  row,
+  onScrolled,
+}: {
   url: string;
   format: SingleCanvasOoxmlKind;
   name: string;
   downloadUrl: string;
   quote: string | null;
   page: number | null;
+  sheet: string | null;
+  cell: string | null;
+  row: number | null;
   onScrolled?: () => void;
 }) {
   const { t } = useI18n();
@@ -847,10 +910,18 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
     if (!pptxSlideSearch) return undefined;
     return findPptxQuoteSlide(pptxSlideSearch, quote);
   }, [format, pptxSlideSearch, quote]);
-  const pptxQuoteReady = format !== "pptx" || !quote || pptxQuoteSlide !== undefined;
+  const pptxTargetSlide = format !== "pptx"
+    ? null
+    : page != null
+      ? page - 1
+      : pptxQuoteSlide;
+  const pptxLocatorReady = format !== "pptx" || page != null || !quote || pptxQuoteSlide !== undefined;
   const quoteJumpContent = format !== "xlsx" && ready && renderKey > 0 && (
     format !== "pptx" || !quote || (
-      pptxQuoteReady && (pptxQuoteSlide == null || pptxQuoteSlide === position.current)
+      pptxLocatorReady && (
+        pptxTargetSlide == null
+        || clampInt(pptxTargetSlide, 0, Math.max(0, position.total - 1)) === position.current
+      )
     )
   )
     ? `${format}:${url}:${position.current}:${renderKey}`
@@ -861,7 +932,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
     quote,
     onScrolled,
     format === "pptx"
-      ? { allowMissing: pptxQuoteReady, consumeOnMissing: pptxQuoteReady }
+      ? { allowMissing: pptxLocatorReady, consumeOnMissing: pptxLocatorReady }
       : undefined,
   );
 
@@ -871,25 +942,70 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
   };
 
   useEffect(() => {
-    if (format !== "pptx" || quote || page == null || !ready || position.total <= 0) return;
-    const target = clampInt(page - 1, 0, position.total - 1);
+    if (
+      format !== "pptx"
+      || !ready
+      || !pptxLocatorReady
+      || pptxTargetSlide == null
+      || position.total <= 0
+    ) return;
+    const target = clampInt(pptxTargetSlide, 0, position.total - 1);
     if (target === position.current) {
-      onScrolled?.();
+      if (!quote) onScrolled?.();
       return;
     }
     let cancelled = false;
     void ooxmlGoTo(format, viewerRef.current, target).then(() => {
-      if (!cancelled) onScrolled?.();
+      if (!cancelled && !quote) onScrolled?.();
     });
     return () => { cancelled = true; };
-  }, [format, onScrolled, page, position.current, position.total, quote, ready]);
+  }, [
+    format,
+    onScrolled,
+    position.current,
+    position.total,
+    pptxLocatorReady,
+    pptxTargetSlide,
+    quote,
+    ready,
+  ]);
 
   useEffect(() => {
-    if (format !== "pptx" || !ready || !quote || pptxQuoteSlide == null || position.total <= 0) return;
-    const target = clampInt(pptxQuoteSlide, 0, position.total - 1);
-    if (target === position.current) return;
-    void ooxmlGoTo(format, viewerRef.current, target);
-  }, [format, position.current, position.total, pptxQuoteSlide, quote, ready]);
+    if (format !== "xlsx" || !ready || position.total <= 0) return;
+    let targetRef = cell || (row != null && row > 0 ? `A${row}` : null);
+    const exactSheet = sheet ? sheetNames.indexOf(sheet) : position.current;
+    let targetSheet = exactSheet >= 0
+      ? exactSheet
+      : sheet
+        ? sheetNames.findIndex((name) => name.toLocaleLowerCase() === sheet.toLocaleLowerCase())
+        : position.current;
+    let cancelled = false;
+    void (async () => {
+      if (!targetRef && quote) {
+        const located = await findXlsxQuoteLocation(
+          viewerRef.current,
+          quote,
+          targetSheet >= 0 ? targetSheet : null,
+        );
+        if (cancelled) return;
+        if (located) {
+          targetSheet = located.sheetIndex;
+          targetRef = located.cellRef;
+        }
+      }
+      if (targetSheet < 0 || (!sheet && !targetRef)) {
+        onScrolled?.();
+        return;
+      }
+      if (targetSheet !== position.current) {
+        await ooxmlGoTo(format, viewerRef.current, targetSheet);
+      }
+      if (cancelled) return;
+      if (targetRef) selectAndRevealXlsxCell(viewerRef.current, targetRef);
+      if (!cancelled) onScrolled?.();
+    })();
+    return () => { cancelled = true; };
+  }, [cell, format, onScrolled, position.current, position.total, quote, ready, row, sheet, sheetNames]);
 
   const setManualZoom = (value: number) => {
     setFitMode("none");
@@ -1350,6 +1466,132 @@ function findPptxQuoteSlide(index: PptxSlideSearchEntry[], quote: string): numbe
   }
   return null;
 }
+
+function docxBlockTextAt(doc: DocxDocumentInstance, blockNumber: number): string | null {
+  if (!Number.isFinite(blockNumber) || blockNumber < 1) return null;
+  const blocks: string[] = [];
+  for (const element of doc.document.body) {
+    if (element.type !== "paragraph" && element.type !== "table") continue;
+    const text = docxElementText(element);
+    if (text) blocks.push(text);
+  }
+  return blocks[blockNumber - 1] || null;
+}
+
+function docxElementText(element: DocxBodyElement | DocxCellElement): string {
+  if (element.type === "paragraph") return docxParagraphText(element);
+  if (element.type === "table") return docxTableText(element);
+  return "";
+}
+
+function docxParagraphText(paragraph: DocxParagraph): string {
+  return paragraph.runs.map((run) => {
+    if (run.type === "text") return run.text;
+    if (run.type === "field") return run.fallbackText;
+    if (run.type === "break") return "\n";
+    return "";
+  }).join("").trim();
+}
+
+function docxTableText(table: DocxTable): string {
+  return table.rows.map((row) => row.cells.map((cell) => (
+    cell.content
+      .map((element) => docxElementText(element))
+      .filter(Boolean)
+      .join("\n")
+      .trim()
+      .replace(/\n/g, " ")
+  )).join(" | ")).join("\n");
+}
+
+function selectAndRevealXlsxCell(viewer: OoxmlViewerInstance | null, ref: string): void {
+  if (!viewer) return;
+  const xlsx = viewer as XlsxViewerInstance;
+  xlsx.select(ref);
+  const address = parseA1Reference(ref);
+  const internal = viewer as unknown as XlsxViewerInternal;
+  const host = internal.scrollHost;
+  const rect = address ? internal.getCellRect?.(address.row, address.col) : null;
+  if (!host || !rect) return;
+  host.scrollTop = Math.max(0, host.scrollTop + rect.y - host.clientHeight / 2);
+  host.scrollLeft = Math.max(0, host.scrollLeft + rect.x - host.clientWidth / 2);
+  window.requestAnimationFrame(() => xlsx.select(ref));
+}
+
+interface XlsxQuoteLocation {
+  sheetIndex: number;
+  cellRef: string;
+}
+
+async function findXlsxQuoteLocation(
+  viewer: OoxmlViewerInstance | null,
+  quote: string,
+  preferredSheetIndex: number | null,
+): Promise<XlsxQuoteLocation | null> {
+  const workbook = (viewer as unknown as XlsxViewerInternal | null)?.wb;
+  if (!workbook) return null;
+  const exact = quote.trim();
+  const needle = normalizeSearchText(quote);
+  if (!exact && needle.length < 3) return null;
+
+  const order = Array.from({ length: workbook.sheetCount }, (_, index) => index);
+  if (preferredSheetIndex != null && preferredSheetIndex >= 0 && preferredSheetIndex < order.length) {
+    order.splice(preferredSheetIndex, 1);
+    order.unshift(preferredSheetIndex);
+  }
+
+  let normalizedMatch: XlsxQuoteLocation | null = null;
+  for (const sheetIndex of order) {
+    let worksheet: Awaited<ReturnType<XlsxWorkbookInstance["getWorksheet"]>>;
+    try {
+      worksheet = await workbook.getWorksheet(sheetIndex);
+    } catch {
+      continue;
+    }
+    for (const row of worksheet.rows) {
+      const rowTexts: string[] = [];
+      let firstCellRef: string | null = null;
+      for (const cell of row.cells) {
+        const text = xlsxCellValueText(cell.value);
+        if (!text) continue;
+        firstCellRef ||= `${cell.colRef}${cell.row}`;
+        rowTexts.push(text);
+        if (exact && text.includes(exact)) {
+          return { sheetIndex, cellRef: `${cell.colRef}${cell.row}` };
+        }
+        if (!normalizedMatch && needle.length >= 3 && normalizeSearchText(text).includes(needle)) {
+          normalizedMatch = { sheetIndex, cellRef: `${cell.colRef}${cell.row}` };
+        }
+      }
+      if (!firstCellRef || rowTexts.length < 2) continue;
+      const rowText = rowTexts.join(" | ");
+      if (exact && rowText.includes(exact)) return { sheetIndex, cellRef: firstCellRef };
+      if (!normalizedMatch && needle.length >= 3 && normalizeSearchText(rowText).includes(needle)) {
+        normalizedMatch = { sheetIndex, cellRef: firstCellRef };
+      }
+    }
+  }
+  return normalizedMatch;
+}
+
+function xlsxCellValueText(value: XlsxCellValue): string {
+  if (value.type === "text") return value.text;
+  if (value.type === "number") return String(value.number);
+  if (value.type === "bool") return String(value.bool);
+  if (value.type === "error") return value.error;
+  return "";
+}
+
+function parseA1Reference(ref: string): { row: number; col: number } | null {
+  const match = /^\$?([A-Za-z]+)\$?([1-9]\d*)$/.exec(ref.trim());
+  if (!match) return null;
+  let col = 0;
+  for (const char of match[1].toUpperCase()) {
+    col = col * 26 + char.charCodeAt(0) - 64;
+  }
+  return { row: parseInt(match[2], 10), col };
+}
+
 async function ooxmlGoTo(
   format: SingleCanvasOoxmlKind,
   viewer: OoxmlViewerInstance | null,

@@ -4,11 +4,12 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-import httpx
-from openai import AsyncOpenAI
-
 from marginalia.config import Settings, get_settings
 from marginalia.model_rate_limit import acquire_model_call_slot
+from marginalia.provider_clients import (
+    get_openai_compatible_client,
+    get_provider_http_client,
+)
 from marginalia.provider_http import raise_for_provider_status
 
 
@@ -23,6 +24,10 @@ class EmbeddingResult:
 
 class EmbeddingConfigError(RuntimeError):
     pass
+
+
+class EmbeddingProviderError(RuntimeError):
+    """The embedding provider failed or returned an invalid response."""
 
 
 def _resolve_embedding_api_key(settings: Settings) -> str | None:
@@ -92,26 +97,43 @@ class DashScopeEmbeddingClient:
             model=self.model,
             tps=self.settings.embedding_tps,
         )
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            client = get_provider_http_client()
             resp = await client.post(self.base_url, headers=headers, json=payload)
             raise_for_provider_status(resp, "embedding")
-        obj = resp.json()
-        output = obj.get("output") if isinstance(obj, dict) else None
-        embeddings = output.get("embeddings") if isinstance(output, dict) else None
-        if not isinstance(embeddings, list):
-            raise RuntimeError("embedding response missing output.embeddings")
-        ordered: list[list[float] | None] = [None] * len(clean)
-        for idx, item in enumerate(embeddings):
-            if not isinstance(item, dict):
-                continue
-            text_index = int(item.get("text_index", idx))
-            vector = item.get("embedding")
-            if isinstance(vector, list) and 0 <= text_index < len(ordered):
-                ordered[text_index] = [float(v) for v in vector]
-        vectors = [_normalize(vec or []) for vec in ordered]
-        usage = obj.get("usage") if isinstance(obj, dict) else None
-        total_tokens = int((usage or {}).get("total_tokens") or 0) if isinstance(usage, dict) else 0
-        return EmbeddingResult(vectors=vectors, total_tokens=total_tokens)
+            obj = resp.json()
+            output = obj.get("output") if isinstance(obj, dict) else None
+            embeddings = output.get("embeddings") if isinstance(output, dict) else None
+            if not isinstance(embeddings, list):
+                raise RuntimeError("embedding response missing output.embeddings")
+            ordered: list[list[float] | None] = [None] * len(clean)
+            for idx, item in enumerate(embeddings):
+                if not isinstance(item, dict):
+                    continue
+                text_index = int(item.get("text_index", idx))
+                vector = item.get("embedding")
+                if isinstance(vector, list) and 0 <= text_index < len(ordered):
+                    ordered[text_index] = [float(v) for v in vector]
+            result = EmbeddingResult(
+                vectors=[_normalize(vec or []) for vec in ordered],
+                total_tokens=(
+                    int((obj.get("usage") or {}).get("total_tokens") or 0)
+                    if isinstance(obj, dict) and isinstance(obj.get("usage"), dict)
+                    else 0
+                ),
+            )
+            _validate_embedding_result(
+                result,
+                expected=len(clean),
+                dimensions=self.dimensions,
+            )
+            return result
+        except EmbeddingProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider clients vary
+            raise EmbeddingProviderError(
+                f"embedding provider request failed: {exc}"
+            ) from exc
 
 
 class OpenAICompatibleEmbeddingClient:
@@ -127,7 +149,6 @@ class OpenAICompatibleEmbeddingClient:
         self.base_url = self.settings.embedding_base_url
         self.model = self.settings.embedding_model
         self.dimensions = max(1, int(self.settings.embedding_dimensions or 1024))
-        self._client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
     async def embed(
         self,
@@ -160,16 +181,34 @@ class OpenAICompatibleEmbeddingClient:
             model=self.model,
             tps=self.settings.embedding_tps,
         )
-        resp = await self._client.embeddings.create(**kwargs)
-        ordered: list[list[float] | None] = [None] * len(clean)
-        for idx, item in enumerate(resp.data):
-            text_index = int(getattr(item, "index", idx))
-            if 0 <= text_index < len(ordered):
-                ordered[text_index] = [float(v) for v in item.embedding]
-        vectors = [_normalize(vec or []) for vec in ordered]
-        usage = getattr(resp, "usage", None)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-        return EmbeddingResult(vectors=vectors, total_tokens=total_tokens)
+        try:
+            client = get_openai_compatible_client(
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
+            resp = await client.embeddings.create(**kwargs)
+            ordered: list[list[float] | None] = [None] * len(clean)
+            for idx, item in enumerate(resp.data):
+                text_index = int(getattr(item, "index", idx))
+                if 0 <= text_index < len(ordered):
+                    ordered[text_index] = [float(v) for v in item.embedding]
+            usage = getattr(resp, "usage", None)
+            result = EmbeddingResult(
+                vectors=[_normalize(vec or []) for vec in ordered],
+                total_tokens=int(getattr(usage, "total_tokens", 0) or 0),
+            )
+            _validate_embedding_result(
+                result,
+                expected=len(clean),
+                dimensions=self.dimensions,
+            )
+            return result
+        except EmbeddingProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - SDK exception types vary
+            raise EmbeddingProviderError(
+                f"embedding provider request failed: {exc}"
+            ) from exc
 
 
 def get_embedding_client(
@@ -193,3 +232,22 @@ def _normalize(vector: list[float]) -> list[float]:
 def _chunked(values: list[str], size: int) -> list[list[str]]:
     chunk_size = max(1, int(size or 1))
     return [values[index:index + chunk_size] for index in range(0, len(values), chunk_size)]
+
+
+def _validate_embedding_result(
+    result: EmbeddingResult,
+    *,
+    expected: int,
+    dimensions: int,
+) -> None:
+    if len(result.vectors) != expected:
+        raise EmbeddingProviderError(
+            "embedding response count mismatch: "
+            f"expected {expected}, received {len(result.vectors)}"
+        )
+    for index, vector in enumerate(result.vectors):
+        if len(vector) != dimensions:
+            raise EmbeddingProviderError(
+                "embedding response dimension mismatch at index "
+                f"{index}: expected {dimensions}, received {len(vector)}"
+            )

@@ -17,9 +17,15 @@ class RunOptions:
 @dataclass(slots=True)
 class TurnUsage:
     input_tokens: int = 0
+    prompt_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    cache_eligible_prompt_tokens: int = 0
+    cache_eligible_read_tokens: int = 0
+    cache_eligible_estimated_tokens: int = 0
+    cache_eligible_requests: int = 0
+    prompt_prefix_breaks: int = 0
     tool_calls: int = 0
     llm_calls: int = 0
     duration_ms: int = 0

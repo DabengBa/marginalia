@@ -24,6 +24,7 @@ from marginalia.eval.core import (
     run_answer_eval_dataset,
     run_answer_probe,
     run_eval_dataset,
+    run_load_eval_dataset,
     run_report_compare_dataset,
 )
 
@@ -115,6 +116,31 @@ def cmd_eval_main(argv: list[str]) -> int:
         help="Optional path to write the full JSON report.",
     )
 
+    p_load = sub.add_parser(
+        "load-run",
+        help="Run concurrent retrieval latency and quality checks.",
+    )
+    p_load.add_argument("name", help="Dataset name under MARGINALIA_HOME/eval/")
+    p_load.add_argument(
+        "--retriever",
+        choices=("search_metadata", "semantic_recall", "recall_knowledge"),
+        default="recall_knowledge",
+    )
+    p_load.add_argument("--corpus-size", type=int, default=None)
+    p_load.add_argument("--requests", type=int, default=1_000)
+    p_load.add_argument("--concurrency", type=int, default=20)
+    p_load.add_argument("--warmup-requests", type=int, default=20)
+    p_load.add_argument("--k", type=int, default=5)
+    p_load.add_argument("--max-error-rate", type=float, default=0.01)
+    p_load.add_argument("--max-p95-ms", type=float, default=None)
+    p_load.add_argument("--min-hit-at-k", type=float, default=None)
+    p_load.add_argument("--min-mrr", type=float, default=None)
+    p_load.add_argument(
+        "--json",
+        dest="json_path",
+        default=None,
+        help="Optional path to write the JSON report.",
+    )
     p_ablation = sub.add_parser(
         "ablation-run",
         help="Run retrieval component ablations for an imported dataset.",
@@ -339,6 +365,8 @@ def cmd_eval_main(argv: list[str]) -> int:
             return asyncio.run(_run_build_semantic_index(args))
         if args.cmd == "run":
             return asyncio.run(_run_eval(args))
+        if args.cmd == "load-run":
+            return asyncio.run(_run_load_eval(args))
         if args.cmd == "ablation-run":
             return asyncio.run(_run_ablation_eval(args))
         if args.cmd == "answer":
@@ -429,6 +457,38 @@ async def _run_eval(args: argparse.Namespace) -> int:
         )
         print(f"\njson_report: {out}")
     return 0
+
+
+async def _run_load_eval(args: argparse.Namespace) -> int:
+    try:
+        result = await run_load_eval_dataset(
+            name=args.name,
+            retriever=args.retriever,
+            k=args.k,
+            request_count=args.requests,
+            concurrency=args.concurrency,
+            warmup_requests=args.warmup_requests,
+            declared_corpus_size=args.corpus_size,
+            max_error_rate=args.max_error_rate,
+            max_p95_ms=args.max_p95_ms,
+            min_hit_at_k=args.min_hit_at_k,
+            min_mrr=args.min_mrr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"eval load-run failed: {exc}")
+        return 1
+    finally:
+        await dispose_engine()
+
+    rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    if args.json_path:
+        out = Path(args.json_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(rendered, encoding="utf-8")
+        print(f"json_report: {out}")
+    else:
+        print(rendered, end="")
+    return 0 if result["ok"] else 1
 
 
 async def _run_ablation_eval(args: argparse.Namespace) -> int:

@@ -60,38 +60,7 @@ def with_disabled_thinking(request: ChatRequest) -> ChatRequest:
 
 
 def detect_openai_compatible_dialect(profile: LlmProfile) -> str:
-    if profile.provider == "openai":
-        return "openai"
-    base_url = (profile.base_url or "").lower()
-    if "dashscope" in base_url or "aliyuncs" in base_url or "bailian" in base_url:
-        return "bailian"
-    if "siliconflow" in base_url:
-        return "siliconflow"
-    if "openrouter" in base_url:
-        return "openrouter"
-    if "together" in base_url:
-        return "together"
-    if "nvidia" in base_url:
-        return "nvidia"
-    if "minimax" in base_url:
-        return "minimax"
-    if (
-        "volces" in base_url
-        or "volcengine" in base_url
-        or "bytepluses" in base_url
-        or "moonshot" in base_url
-        or "xiaomimimo" in base_url
-        or "ark.cn-" in base_url
-        or "ark.ap-" in base_url
-    ):
-        return "thinking-type"
-    if "generativelanguage.googleapis.com" in base_url or "googleapis.com" in base_url:
-        return "gemini"
-    if "deepseek" in base_url:
-        return "deepseek"
-    if _looks_ollama_endpoint(base_url):
-        return "ollama"
-    return "openai-compatible"
+    return profile.capabilities.dialect
 
 
 def apply_openai_reasoning_controls(

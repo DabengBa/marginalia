@@ -22,6 +22,9 @@ from marginalia.llm.tagged_response import (
 )
 from marginalia.pipelines.base import TagSuggestion
 
+INGEST_ADAPTIVE_MIN_OUTPUT_TOKENS = 1_024
+INGEST_MAX_OUTPUT_TOKENS = 16_384
+
 
 def llm_ingest_concurrency() -> int:
     """Runtime-configured fan-out for independent ingest LLM calls."""
@@ -29,6 +32,36 @@ def llm_ingest_concurrency() -> int:
 
     value = int(get_settings().llm_ingest_concurrency or 1)
     return max(1, min(32, value))
+
+
+def ingest_output_limit(configured: int | None = None) -> int:
+    """Return the configured per-call ingest output ceiling."""
+    if configured is None:
+        from marginalia.config import get_settings
+
+        configured = get_settings().llm_ingest_max_tokens
+    limit = int(configured)
+    if limit < 0:
+        raise ValueError("configured ingest output tokens must be non-negative")
+    if limit == 0:
+        return 0
+    return min(INGEST_MAX_OUTPUT_TOKENS, limit)
+
+
+def ingest_output_tokens(
+    char_count: int,
+    *,
+    configured: int | None = None,
+) -> int:
+    """Scale an indexing response budget without crossing its hard ceiling."""
+    configured_limit = ingest_output_limit(configured)
+    if configured_limit == 0:
+        return 0
+    adaptive = max(
+        INGEST_ADAPTIVE_MIN_OUTPUT_TOKENS,
+        max(0, int(char_count)) // 8,
+    )
+    return min(configured_limit, adaptive)
 
 
 @dataclass(slots=True)
@@ -42,7 +75,12 @@ class IndexFields:
     tags: list[TagSuggestion]
 
 
-def parse_index_response(resp: Any, *, anchor_unit: str) -> IndexFields:
+def parse_index_response(
+    resp: Any,
+    *,
+    anchor_unit: str,
+    fallback_sections: list[dict[str, Any]] | None = None,
+) -> IndexFields:
     """Parse either the current tagged format or older parsed_json fakes.
 
     Some local e2e tests still return `parsed_json`; production prompts ask
@@ -51,15 +89,27 @@ def parse_index_response(resp: Any, *, anchor_unit: str) -> IndexFields:
     """
     payload = getattr(resp, "parsed_json", None)
     if isinstance(payload, dict):
-        return _parse_json_payload(payload, anchor_unit=anchor_unit)
+        fields = _parse_json_payload(payload, anchor_unit=anchor_unit)
+        if not fields.sections:
+            fields.sections = normalize_sections(
+                fallback_sections,
+                fallback=[],
+                anchor_unit=anchor_unit,
+            )
+        return fields
 
     tagged = parse_tagged(getattr(resp, "text", None) or "")
+    sections = parse_sections(
+        tagged.get("sections", ""), anchor_unit=anchor_unit,
+    ) or normalize_sections(
+        fallback_sections,
+        fallback=[],
+        anchor_unit=anchor_unit,
+    )
     return IndexFields(
         summary=tagged.get("summary", "").strip(),
         description_text=_clean(tagged.get("description")),
-        sections=parse_sections(
-            tagged.get("sections", ""), anchor_unit=anchor_unit,
-        ),
+        sections=sections,
         extra=_clean(tagged.get("extra")),
         entry_extra=_clean(tagged.get("entry_extra")),
         catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
@@ -179,6 +229,55 @@ def render_sections_digest(
         lines.append(line)
         total += len(line) + 1
     return "\n".join(lines)
+
+
+def normalize_sections(
+    value: object,
+    *,
+    fallback: list[dict[str, Any]] | None,
+    anchor_unit: str,
+) -> list[dict[str, Any]]:
+    """Normalize extraction- or model-supplied sections to stable anchors."""
+    raw_sections = value if isinstance(value, list) else fallback
+    if not isinstance(raw_sections, list):
+        return []
+    sections: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_sections[:200], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = _clean(item.get("title") or item.get("heading")) or f"Section {index}"
+        summary = _clean(item.get("summary")) or ""
+        raw_terms = item.get("key_terms") or item.get("terms") or []
+        term_values = raw_terms if isinstance(raw_terms, list) else str(raw_terms).split(",")
+        key_terms = [
+            str(term).strip()
+            for term in term_values
+            if str(term).strip()
+        ][:20]
+        anchor = item.get("anchor")
+        if not isinstance(anchor, dict):
+            anchor_value = _clean(
+                item.get("anchor")
+                or item.get("line_range")
+                or item.get("page_range")
+                or item.get("row_range")
+            )
+            anchor = {"unit": anchor_unit, "value": anchor_value or title}
+        sections.append({
+            "id": _clean(item.get("id")) or f"s{index}",
+            "title": title,
+            "summary": summary,
+            "key_terms": key_terms,
+            "anchor": {
+                "unit": _clean(anchor.get("unit")) or anchor_unit,
+                "value": _clean(anchor.get("value") or anchor.get("path")) or title,
+            },
+        })
+    return sections
+
+
+def plain_summary(text: str, *, limit: int = 500) -> str:
+    return " ".join(text.split())[:limit]
 
 
 def _parse_json_payload(payload: dict[str, Any], *, anchor_unit: str) -> IndexFields:

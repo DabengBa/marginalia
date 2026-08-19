@@ -439,10 +439,11 @@ export function useQuoteJump(
   content: string | null,
   quote: string | null,
   onScrolled?: () => void,
-  opts?: { allowMissing?: boolean; consumeOnMissing?: boolean },
+  opts?: { allowMissing?: boolean; consumeOnMissing?: boolean; context?: string | null },
 ) {
   const allowMissing = opts?.allowMissing ?? true;
   const consumeOnMissing = opts?.consumeOnMissing ?? true;
+  const context = opts?.context ?? null;
   const [hit, setHit] = useState<"found" | "missing" | null>(null);
   useEffect(() => {
     if (!quote || !content || !ref.current) {
@@ -457,7 +458,7 @@ export function useQuoteJump(
     // highlighting, KaTeX). Two frames is enough for prism + react-markdown.
     const handle1 = window.requestAnimationFrame(() => {
       handle2 = window.requestAnimationFrame(() => {
-        marks = highlightQuoteInDom(root, quote);
+        marks = highlightQuoteInDom(root, quote, context);
         if (marks.length > 0) {
           marks[0].scrollIntoView({ block: "center", behavior: "smooth" });
           setHit("found");
@@ -479,7 +480,7 @@ export function useQuoteJump(
       if (cleanup != null) window.clearTimeout(cleanup);
       marks.forEach(unwrapMark);
     };
-  }, [allowMissing, consumeOnMissing, content, quote, onScrolled, ref]);
+  }, [allowMissing, consumeOnMissing, content, context, quote, onScrolled, ref]);
   const banner = quote && hit === "found"
     ? <LocatorBanner kind="quote" quote={quote} />
     : quote && hit === "missing"
@@ -488,10 +489,15 @@ export function useQuoteJump(
   return { banner };
 }
 
-function highlightQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
+function highlightQuoteInDom(
+  root: HTMLElement,
+  quote: string,
+  context: string | null,
+): HTMLElement[] {
+  if (context) return highlightNormalizedQuoteInDom(root, quote, context);
   const exact = highlightExactQuoteInDom(root, quote);
   if (exact.length > 0) return exact;
-  return highlightNormalizedQuoteInDom(root, quote);
+  return highlightNormalizedQuoteInDom(root, quote, null);
 }
 
 function highlightExactQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
@@ -523,11 +529,26 @@ interface TextSegment {
   end: number;
 }
 
-function highlightNormalizedQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
+function highlightNormalizedQuoteInDom(
+  root: HTMLElement,
+  quote: string,
+  context: string | null,
+): HTMLElement[] {
   const needle = normalizeSearchText(quote);
   if (needle.length < 3) return [];
   const index = buildDomSearchIndex(root);
-  const start = index.text.indexOf(needle);
+  let start = -1;
+  const normalizedContext = context ? normalizeSearchText(context) : "";
+  if (normalizedContext) {
+    const contextStart = index.text.indexOf(normalizedContext);
+    if (contextStart !== -1) {
+      const candidate = index.text.indexOf(needle, contextStart);
+      if (candidate !== -1 && candidate < contextStart + normalizedContext.length) {
+        start = candidate;
+      }
+    }
+  }
+  if (start === -1) start = index.text.indexOf(needle);
   if (start === -1) return [];
   const end = start + needle.length;
   const segments = segmentsForMatch(index.map.slice(start, end));

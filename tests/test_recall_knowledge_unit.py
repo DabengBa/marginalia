@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from marginalia.agent.tools import ToolContext
@@ -94,6 +96,66 @@ async def test_recall_knowledge_skips_semantic_without_embedding_key(
 
     assert "semantic" not in result["trace"]
     assert "semantic_error" not in result["trace"]
+
+
+@pytest.mark.asyncio
+async def test_recall_backfills_only_confident_lexical_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import marginalia.agent.tools.recall_knowledge as module
+
+    async def fake_search_metadata(db, ctx, args):  # noqa: ANN001
+        return {
+            "count": 2,
+            "entries": [
+                {"entry_id": "strong", "display_name": "strong.txt"},
+                {"entry_id": "weak", "display_name": "weak.txt"},
+            ],
+        }
+
+    async def fake_search_journal(db, args, *, match):  # noqa: ANN001
+        return {"count": 0, "notes": []}
+
+    async def fake_semantic_rows(*args, **kwargs):  # noqa: ANN002, ANN003
+        return []
+
+    async def fake_best_sections(*args, **kwargs):  # noqa: ANN002, ANN003
+        return {
+            "strong": ("section-strong", 0.86),
+            "weak": ("section-weak", 0.2),
+        }
+
+    async def fake_expansion(db, anchor_entry_ids, *, limit):  # noqa: ANN001
+        return []
+
+    settings = SimpleNamespace(
+        semantic_recall_limit=100,
+        section_backfill_min_score=0.45,
+        rerank_top_n=80,
+        evidence_selection="quota",
+    )
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    monkeypatch.setattr(module, "search_metadata", fake_search_metadata)
+    monkeypatch.setattr(module, "run_search_journal", fake_search_journal)
+    monkeypatch.setattr(module, "semantic_recall_configured", lambda: True)
+    monkeypatch.setattr(module, "semantic_entry_rows", fake_semantic_rows)
+    monkeypatch.setattr(module, "best_semantic_sections", fake_best_sections)
+    monkeypatch.setattr(module, "rerank_configured", lambda _settings: False)
+    monkeypatch.setattr(module, "_one_hop_expansion_ids", fake_expansion)
+
+    result = await module.recall_knowledge(
+        None,
+        ToolContext(session_id="s", conversation_id="c"),
+        {"text": "rollback", "limit": 2},
+    )
+
+    by_id = {row["entry_id"]: row for row in result["entries"]}
+    assert by_id["strong"]["matched_section_id"] == "section-strong"
+    assert by_id["strong"]["matched_section_origin"] == "section_backfill"
+    assert by_id["strong"]["evidence_level"] == "section"
+    assert by_id["strong"]["match_origin"] == "section_backfill"
+    assert by_id["weak"]["matched_section_id"] is None
+    assert result["trace"]["section_backfill"]["matched"] == 1
 
 
 def test_recall_score_prefers_overlap_with_field_match() -> None:

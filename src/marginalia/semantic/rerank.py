@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import httpx
-
 from marginalia.config import Settings, get_settings
 from marginalia.model_rate_limit import acquire_model_call_slot
+from marginalia.provider_clients import get_provider_http_client
 from marginalia.provider_http import raise_for_provider_status
 
 
@@ -18,6 +17,10 @@ class RerankHit:
 
 class RerankConfigError(RuntimeError):
     pass
+
+
+class RerankProviderError(RuntimeError):
+    """The rerank provider failed or returned no usable results."""
 
 
 def rerank_configured(settings: Settings | None = None) -> bool:
@@ -99,10 +102,22 @@ class BailianRerankClient:
             model=self.model,
             tps=self.settings.rerank_tps,
         )
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            client = get_provider_http_client()
             resp = await client.post(self.endpoint, headers=headers, json=payload)
             raise_for_provider_status(resp, "rerank")
-        return _parse_rerank_hits(resp.json())
+            hits = _parse_rerank_hits(resp.json())
+            if not hits:
+                raise RerankProviderError(
+                    "rerank response contained no valid results"
+                )
+            return hits
+        except RerankProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider clients vary
+            raise RerankProviderError(
+                f"rerank provider request failed: {exc}"
+            ) from exc
 
 
 def get_rerank_client(settings: Settings | None = None) -> BailianRerankClient:

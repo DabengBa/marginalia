@@ -38,9 +38,17 @@ def _utcnow() -> datetime:
 async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     cutoff = now - timedelta(seconds=GRACE_SECONDS)
+    try:
+        limit = max(1, min(int(payload.get("limit") or 500), 5000))
+    except (TypeError, ValueError):
+        limit = 500
 
     async with session_scope() as session:
-        rows = await tasks_repo.list_stale_running(session, now=cutoff)
+        rows = await tasks_repo.list_stale_running(
+            session,
+            now=cutoff,
+            limit=limit,
+        )
 
         recovered = 0
         marked_dead = 0
@@ -48,12 +56,16 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
             previous_locked = t.locked_by
             previous_lease = t.lease_expires_at
             if t.attempts >= t.max_attempts:
-                await tasks_repo.mark_running_dead(
+                changed = await tasks_repo.mark_running_dead(
                     session,
                     task_id=t.id,
                     now=now,
                     error="recover_stuck_tasks: lease expired beyond max_attempts",
+                    previous_worker_id=previous_locked,
+                    previous_lease_expires_at=previous_lease,
                 )
+                if not changed:
+                    continue
                 await mark_file_failed_for_dead_ingest_task(
                     session,
                     task_id=t.id,
@@ -78,9 +90,15 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
                 )
                 marked_dead += 1
             else:
-                await tasks_repo.revive_running_to_pending(
-                    session, task_id=t.id, now=now,
+                changed = await tasks_repo.revive_running_to_pending(
+                    session,
+                    task_id=t.id,
+                    now=now,
+                    previous_worker_id=previous_locked,
+                    previous_lease_expires_at=previous_lease,
                 )
+                if not changed:
+                    continue
                 await audit_events_repo.append(
                     session,
                     kind="task_recovered",

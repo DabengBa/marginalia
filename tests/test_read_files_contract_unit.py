@@ -48,6 +48,21 @@ def _docx_with_heading() -> bytes:
     return out.getvalue()
 
 
+def _docx_with_table() -> bytes:
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Product definition")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Indicator"
+    table.cell(0, 1).text = "Strategy"
+    table.cell(1, 0).text = "Comfort"
+    table.cell(1, 1).text = "L"
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
 def _pptx_with_heading() -> bytes:
     from pptx import Presentation
 
@@ -56,6 +71,16 @@ def _pptx_with_heading() -> bytes:
     slide.shapes.title.text = "Contract Slide"
     box = slide.shapes.add_textbox(914400, 1371600, 5486400, 914400)
     box.text = "Slide body line"
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue()
+
+
+def _pptx_with_empty_tail() -> bytes:
+    from pptx import Presentation
+
+    prs = Presentation(io.BytesIO(_pptx_with_heading()))
+    prs.slides.add_slide(prs.slide_layouts[6])
     out = io.BytesIO()
     prs.save(out)
     return out.getvalue()
@@ -141,6 +166,77 @@ async def test_pptx_heading_and_line_reads_use_complete_extracted_text() -> None
     assert line.error is None
     assert "Contract Slide" in line.text
     assert line.extras["line_start"] == 1
+
+
+@pytest.mark.asyncio
+async def test_docx_question_prefers_extracted_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden_vision(**_kwargs):
+        raise AssertionError("readable DOCX text must bypass vision")
+
+    monkeypatch.setattr(
+        "marginalia.pipelines.docx.answer_document_image_question",
+        forbidden_vision,
+    )
+    result = await DocxPipeline().read_segment(
+        file_row=SimpleNamespace(storage_key="file-key", description=None),
+        args={"question": "What is the strategy?"},
+        storage=_MemoryStorage(_docx_with_table()),
+    )
+
+    assert result.error is None
+    assert result.extras["mode"] == "docx_text_question"
+    assert result.extras["answered_by"] == "docx_extracted_text"
+    assert result.extras["source_text_preserved"] is True
+    assert "Product definition" in result.text
+    assert "Comfort | L" in result.text
+
+
+@pytest.mark.asyncio
+async def test_pptx_question_prefers_extracted_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden_vision(**_kwargs):
+        raise AssertionError("readable PPTX text must bypass vision")
+
+    monkeypatch.setattr(
+        "marginalia.pipelines.pptx.answer_document_image_question",
+        forbidden_vision,
+    )
+    result = await PptxPipeline().read_segment(
+        file_row=SimpleNamespace(storage_key="file-key", description=None),
+        args={"question": "What does the slide say?"},
+        storage=_MemoryStorage(_pptx_with_heading()),
+    )
+
+    assert result.error is None
+    assert result.extras["mode"] == "pptx_text_question"
+    assert result.extras["answered_by"] == "pptx_extracted_text"
+    assert result.extras["source_text_preserved"] is True
+    assert "Slide body line" in result.text
+
+
+@pytest.mark.asyncio
+async def test_pptx_empty_tail_does_not_replace_earlier_source_text() -> None:
+    result = await PptxPipeline().read_segment(
+        file_row=SimpleNamespace(
+            storage_key="file-key",
+            description={
+                "document_vision": {
+                    "text": "Persisted image-only evidence.",
+                    "images": [],
+                }
+            },
+        ),
+        args={"slide_start": 1, "slide_end": 2},
+        storage=_MemoryStorage(_pptx_with_empty_tail()),
+    )
+
+    assert result.error is None
+    assert "Contract Slide" in result.text
+    assert "Slide body line" in result.text
+    assert "# Slide 2\n(no extractable text)" in result.text
 
 
 @pytest.mark.asyncio

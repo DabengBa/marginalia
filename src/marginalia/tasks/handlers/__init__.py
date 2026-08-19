@@ -6,6 +6,8 @@ their own — they're imported only as helper functions by their parent
 dispatcher kinds (mine_relations, suggest_lifecycle, prune, tag_quality).
 """
 from marginalia.tasks.handlers import ingest_file  # noqa: F401
+from marginalia.tasks.handlers import bulk_reprocess_files  # noqa: F401
+from marginalia.tasks.handlers import delete_storage_object  # noqa: F401
 from marginalia.tasks.handlers import mine_relations  # noqa: F401
 from marginalia.tasks.handlers import periodic_tick  # noqa: F401
 from marginalia.tasks.handlers import propose_views  # noqa: F401
@@ -15,6 +17,7 @@ from marginalia.tasks.handlers import recover_stuck_tasks  # noqa: F401
 from marginalia.tasks.handlers import rebuild_semantic_index  # noqa: F401
 from marginalia.tasks.handlers import reflect_turn  # noqa: F401
 from marginalia.tasks.handlers import refresh_entry_extra  # noqa: F401
+from marginalia.tasks.handlers import refresh_semantic_file  # noqa: F401
 from marginalia.tasks.handlers import restructure_catalogs  # noqa: F401
 from marginalia.tasks.handlers import suggest_lifecycle  # noqa: F401
 from marginalia.tasks.handlers import summarize_session  # noqa: F401

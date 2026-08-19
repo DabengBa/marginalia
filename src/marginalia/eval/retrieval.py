@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -195,6 +197,187 @@ async def run_eval_dataset(
         queries_total=len(queries),
         per_query=per_query,
     )
+
+
+async def run_load_eval_dataset(
+    *,
+    name: str,
+    retriever: str = "recall_knowledge",
+    k: int = 5,
+    request_count: int = 1_000,
+    concurrency: int = 20,
+    warmup_requests: int = 20,
+    declared_corpus_size: int | None = None,
+    max_error_rate: float = 0.01,
+    max_p95_ms: float | None = None,
+    min_hit_at_k: float | None = None,
+    min_mrr: float | None = None,
+) -> dict[str, Any]:
+    """Run bounded concurrent retrieval latency and quality checks."""
+    await bootstrap_schema()
+    dataset_dir = eval_root() / name
+    if not (dataset_dir / "manifest.json").exists():
+        raise RuntimeError(f"eval dataset {name!r} is not imported")
+    doc_map: dict[str, str] = _read_json(dataset_dir / "doc_map.json")
+    qrels = load_qrels(dataset_dir / "qrels.tsv")
+    cases: list[tuple[str, str, set[str]]] = []
+    for query in iter_beir_queries(dataset_dir / "queries.jsonl"):
+        expected = {
+            doc_map[doc_id]
+            for doc_id, relevance in qrels.get(query.query_id, {}).items()
+            if relevance > 0 and doc_id in doc_map
+        }
+        if expected:
+            cases.append((query.query_id, query.text, expected))
+
+    async def retrieve(query: str, limit: int) -> list[str]:
+        async with session_scope() as session:
+            return await _retrieve_entries(
+                session,
+                retriever=retriever,
+                query=query,
+                limit=limit,
+            )
+
+    return await run_load_eval_with_retriever(
+        retrieve,
+        cases=cases,
+        k=k,
+        request_count=request_count,
+        concurrency=concurrency,
+        warmup_requests=warmup_requests,
+        declared_corpus_size=declared_corpus_size or len(doc_map),
+        max_error_rate=max_error_rate,
+        max_p95_ms=max_p95_ms,
+        min_hit_at_k=min_hit_at_k,
+        min_mrr=min_mrr,
+    )
+
+
+async def run_load_eval_with_retriever(
+    retrieve: Callable[[str, int], Awaitable[list[str]]],
+    *,
+    cases: list[tuple[str, str, set[str]]],
+    k: int,
+    request_count: int,
+    concurrency: int,
+    warmup_requests: int = 0,
+    declared_corpus_size: int | None = None,
+    max_error_rate: float = 0.01,
+    max_p95_ms: float | None = None,
+    min_hit_at_k: float | None = None,
+    min_mrr: float | None = None,
+) -> dict[str, Any]:
+    """Measure one retrieval callable without coupling the runner to HTTP."""
+    if not cases:
+        raise ValueError("load eval requires at least one query with relevant entries")
+    bounded_k = max(1, int(k))
+    total_requests = max(1, int(request_count))
+    worker_count = min(max(1, int(concurrency)), total_requests)
+    warmup_count = max(0, int(warmup_requests))
+    for index in range(warmup_count):
+        _case_id, query, _expected = cases[index % len(cases)]
+        try:
+            await retrieve(query, bounded_k)
+        except Exception:
+            pass
+
+    next_request = 0
+    latencies_ms: list[float] = []
+    relevant_ranks: list[int | None] = []
+    error_count = 0
+    error_samples: list[dict[str, Any]] = []
+
+    async def worker() -> None:
+        nonlocal next_request, error_count
+        while True:
+            request_index = next_request
+            next_request += 1
+            if request_index >= total_requests:
+                return
+            case_id, query, expected = cases[request_index % len(cases)]
+            started = time.perf_counter()
+            try:
+                ranked = await retrieve(query, bounded_k)
+                relevant_ranks.append(_first_expected_rank(ranked, expected))
+            except Exception as exc:  # noqa: BLE001 - failures are measured output
+                error_count += 1
+                relevant_ranks.append(None)
+                if len(error_samples) < 20:
+                    error_samples.append({
+                        "case_id": case_id,
+                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    })
+            finally:
+                latencies_ms.append((time.perf_counter() - started) * 1000)
+
+    run_started = time.perf_counter()
+    await asyncio.gather(*(worker() for _ in range(worker_count)))
+    elapsed_seconds = max(time.perf_counter() - run_started, 1e-9)
+    error_rate = error_count / total_requests
+    hit_at_k = (
+        sum(1 for rank in relevant_ranks if rank is not None and rank <= bounded_k)
+        / total_requests
+    )
+    mrr = sum(1 / rank for rank in relevant_ranks if rank is not None) / total_requests
+    latency = {
+        "min": min(latencies_ms) if latencies_ms else 0.0,
+        "p50": _percentile(latencies_ms, 50),
+        "p95": _percentile(latencies_ms, 95),
+        "p99": _percentile(latencies_ms, 99),
+        "max": max(latencies_ms) if latencies_ms else 0.0,
+        "mean": sum(latencies_ms) / len(latencies_ms) if latencies_ms else 0.0,
+    }
+    violations: list[str] = []
+    if error_rate > max_error_rate:
+        violations.append(f"error_rate {error_rate:.6f} > {max_error_rate:.6f}")
+    if max_p95_ms is not None and latency["p95"] > max_p95_ms:
+        violations.append(f"p95_ms {latency['p95']:.3f} > {max_p95_ms:.3f}")
+    if min_hit_at_k is not None and hit_at_k < min_hit_at_k:
+        violations.append(f"hit_at_{bounded_k} {hit_at_k:.6f} < {min_hit_at_k:.6f}")
+    if min_mrr is not None and mrr < min_mrr:
+        violations.append(f"mrr {mrr:.6f} < {min_mrr:.6f}")
+    return {
+        "ok": not violations,
+        "declared_corpus_size": declared_corpus_size,
+        "request_count": total_requests,
+        "concurrency": worker_count,
+        "warmup_requests": warmup_count,
+        "elapsed_seconds": elapsed_seconds,
+        "requests_per_second": total_requests / elapsed_seconds,
+        "success_count": total_requests - error_count,
+        "error_count": error_count,
+        "error_rate": error_rate,
+        "latency_ms": latency,
+        "k": bounded_k,
+        "hit_at_k": hit_at_k,
+        "mrr": mrr,
+        "thresholds": {
+            "max_error_rate": max_error_rate,
+            "max_p95_ms": max_p95_ms,
+            "min_hit_at_k": min_hit_at_k,
+            "min_mrr": min_mrr,
+        },
+        "violations": violations,
+        "error_samples": error_samples,
+    }
+
+
+def _first_expected_rank(ranked: list[str], expected: set[str]) -> int | None:
+    return next((index for index, entry_id in enumerate(ranked, start=1) if entry_id in expected), None)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * min(max(percentile, 0.0), 100.0) / 100.0
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
 def default_ablation_configs() -> list[EvalAblationConfig]:
@@ -463,7 +646,10 @@ async def _retrieve_recall_knowledge_many(
         entry_map: dict[str, dict[str, Any]] = {}
         _merge_eval_entries(entry_map, metadata_entries, "metadata_text")
         semantic_entries = [
-            semantic_rows_by_id[hit.entry_id]
+            {
+                **semantic_rows_by_id[hit.entry_id],
+                "matched_section_id": hit.section_id,
+            }
             for hit in semantic_hits
             if hit.entry_id in semantic_rows_by_id
         ]
@@ -478,12 +664,24 @@ async def _retrieve_recall_knowledge_many(
                     rerank_entry_ids.append(entry_id)
 
     if rerank_entry_ids and use_rerank:
-        documents_by_id = await load_rerank_documents_by_entry_id(session, rerank_entry_ids)
+        documents_by_query: list[dict[str, str]] = []
+        for ranked in ranked_by_query:
+            top = ranked[:rerank_top_n]
+            documents_by_query.append(await load_rerank_documents_by_entry_id(
+                session,
+                [str(row.get("entry_id") or "") for row in top],
+                matched_section_ids={
+                    str(row["entry_id"]): str(row["matched_section_id"])
+                    for row in top
+                    if row.get("entry_id") and row.get("matched_section_id")
+                },
+            ))
         semaphore = asyncio.Semaphore(max(1, int(settings.rerank_concurrency or 10)))
 
         async def _rerank_one(
             query: str,
             ranked: list[dict[str, Any]],
+            documents_by_id: dict[str, str],
         ) -> list[dict[str, Any]]:
             if not query.strip() or not ranked:
                 return ranked
@@ -496,8 +694,12 @@ async def _retrieve_recall_knowledge_many(
                 return reranked
 
         ranked_by_query = await asyncio.gather(*(
-            _rerank_one(query, ranked)
-            for query, ranked in zip(queries_for_rerank, ranked_by_query)
+            _rerank_one(query, ranked, documents_by_id)
+            for query, ranked, documents_by_id in zip(
+                queries_for_rerank,
+                ranked_by_query,
+                documents_by_query,
+            )
         ))
 
     out: list[dict[str, list[str]]] = []
@@ -653,6 +855,7 @@ def _merge_eval_entries(
                 "catalog_id": entry.get("catalog_id"),
                 "folder_id": entry.get("folder_id"),
                 "coverage": entry.get("coverage"),
+                "matched_section_id": entry.get("matched_section_id"),
                 "matched_by": [],
                 "rrf_score": 0.0,
                 "rank_score": 0,
@@ -669,6 +872,7 @@ def _merge_eval_entries(
                 "catalog_id",
                 "folder_id",
                 "coverage",
+                "matched_section_id",
             ):
                 if existing.get(key) in (None, "") and entry.get(key) not in (None, ""):
                     existing[key] = entry.get(key)

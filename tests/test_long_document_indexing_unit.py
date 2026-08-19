@@ -128,7 +128,7 @@ async def test_text_single_ingest_retries_empty_response_with_larger_budget(
     result = await TextPipeline().run(ctx=ctx, storage=_BytesStorage(body))
 
     assert result.summary == "A short markdown note about retrying empty LLM output."
-    assert [r.max_tokens for r in fake.requests] == [8192, 16384]
+    assert [r.max_tokens for r in fake.requests] == [1024, 1200]
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 [package]
 name = "marginalia-tauri"
-version = "0.3.3"
+version = "0.3.4"
 description = "Marginalia desktop shell"
 authors = ["Marginalia"]
 license = ""

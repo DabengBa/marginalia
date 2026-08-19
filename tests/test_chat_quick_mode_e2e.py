@@ -223,7 +223,7 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
     assert chat.requests[2].tool_choice == "auto"
     assert chat.requests[3].tools is not None
     assert chat.requests[3].tool_choice == "auto"
-    assert chat.requests[4].tools is None
+    assert chat.requests[4].tools == chat.requests[3].tools
     assert chat.requests[4].tool_choice == "none"
     assert "Quick mode final execute round" in chat.requests[4].messages[-1].content
 
@@ -330,9 +330,9 @@ async def test_quick_mode_repairs_tool_call_on_final_answer_round() -> None:
     ]
 
     assert len(chat.requests) == 6
-    assert chat.requests[4].tools is None
+    assert chat.requests[4].tools == chat.requests[3].tools
     assert chat.requests[4].tool_choice == "none"
-    assert chat.requests[5].tools is None
+    assert chat.requests[5].tools == chat.requests[4].tools
     assert chat.requests[5].tool_choice == "none"
     assert any(
         "previous response attempted a tool call" in str(message.content)

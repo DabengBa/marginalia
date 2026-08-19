@@ -45,10 +45,17 @@ class LocalStorage(StorageBackend):
         target = self._path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".part")
-        async with aiofiles.open(tmp, "wb") as f:
-            async for chunk in stream:
-                await f.write(chunk)
-        os.replace(tmp, target)
+        try:
+            async with aiofiles.open(tmp, "wb") as f:
+                async for chunk in stream:
+                    await f.write(chunk)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                await aiofiles.os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            raise
         return key
 
     async def rename(self, old_key: str, new_key: str) -> str:

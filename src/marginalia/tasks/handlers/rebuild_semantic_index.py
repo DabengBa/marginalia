@@ -13,6 +13,8 @@ async def handle_rebuild_semantic_index(payload: Mapping[str, Any]) -> None:
     index_name = str(payload.get("index_name") or DEFAULT_INDEX_NAME)
     batch_size = payload.get("batch_size")
     concurrency = int(payload.get("concurrency") or 1)
+    page_size = payload.get("page_size")
+    task_id = str(payload.get("_task_id") or "") or None
 
     async with session_scope() as session:
         result = await build_semantic_index(
@@ -20,8 +22,12 @@ async def handle_rebuild_semantic_index(payload: Mapping[str, Any]) -> None:
             index_name=index_name,
             batch_size=int(batch_size) if batch_size is not None else None,
             concurrency=concurrency,
-            resume=False,
+            # A task-specific resume key prevents an interrupted rebuild from
+            # mixing with a manual CLI rebuild or a later independent task.
+            resume=task_id is not None,
+            resume_key=task_id,
             progress_every=0,
+            page_size=int(page_size) if page_size is not None else None,
         )
         await audit_events_repo.append(
             session,

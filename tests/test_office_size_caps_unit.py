@@ -52,7 +52,7 @@ async def test_docx_ingest_no_longer_rejects_by_package_size(monkeypatch):
         seen["bytes"] = len(body)
         return ["Large docx parsed"]
 
-    async def fake_index(body, ctx, *, kind, coverage):
+    async def fake_index(body, ctx, *, kind, coverage, **_kwargs):
         return _FakeResult(
             body=body,
             ctx=ctx,
@@ -86,7 +86,7 @@ async def test_spreadsheet_ingest_no_longer_rejects_by_package_size(monkeypatch)
             "indexed_rows": 1,
         }
 
-    async def fake_index(body, ctx, *, kind, coverage):
+    async def fake_index(body, ctx, *, kind, coverage, **_kwargs):
         return _FakeResult(
             body=body,
             ctx=ctx,
@@ -125,7 +125,7 @@ async def test_pptx_ingest_no_longer_rejects_by_package_size(monkeypatch):
             "indexed_slides": 1,
         }
 
-    async def fake_index(body, ctx, *, kind, coverage):
+    async def fake_index(body, ctx, *, kind, coverage, **_kwargs):
         return _FakeResult(
             body=body,
             ctx=ctx,

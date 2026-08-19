@@ -31,6 +31,7 @@ from marginalia.pipelines.base import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 from marginalia.vendor.headroom.transforms.log_compressor import (
     LogCompressor,
     LogCompressorConfig,
@@ -87,27 +88,31 @@ class LogPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        lines, indexed_bytes, read_truncated = await self._read_lines_with_meta(
-            storage, ctx.storage_key,
-        )
-        stats = _summarize(lines)
-        sampled = _sample_for_indexer(lines, stats)
-        coverage = _log_coverage(
-            total_bytes=ctx.size_bytes,
-            indexed_bytes=indexed_bytes,
-            loaded_lines=len(lines),
-            sampled_lines=_sampled_line_count(sampled),
-            read_truncated=read_truncated,
-            sample_truncated=any("sample truncated" in line or "safety cap" in line for line in sampled),
-        )
-        body = (
-            f"Log file extracted view:\n"
-            f"  loaded lines: {stats['line_count']}\n"
-            f"  time range:   {stats['first_ts'] or '?'} -> {stats['last_ts'] or '?'}\n"
-            f"  levels:       {stats['level_counts']}\n"
-            f"\n--- sampled lines ---\n"
-            + "\n".join(sampled)
-        )
+        with measure_stage("extraction"):
+            lines, indexed_bytes, read_truncated = await self._read_lines_with_meta(
+                storage, ctx.storage_key,
+            )
+            stats = _summarize(lines)
+            sampled = _sample_for_indexer(lines, stats)
+            coverage = _log_coverage(
+                total_bytes=ctx.size_bytes,
+                indexed_bytes=indexed_bytes,
+                loaded_lines=len(lines),
+                sampled_lines=_sampled_line_count(sampled),
+                read_truncated=read_truncated,
+                sample_truncated=any(
+                    "sample truncated" in line or "safety cap" in line
+                    for line in sampled
+                ),
+            )
+            body = (
+                f"Log file extracted view:\n"
+                f"  loaded lines: {stats['line_count']}\n"
+                f"  time range:   {stats['first_ts'] or '?'} -> {stats['last_ts'] or '?'}\n"
+                f"  levels:       {stats['level_counts']}\n"
+                f"\n--- sampled lines ---\n"
+                + "\n".join(sampled)
+            )
         return await index_extracted_text(
             body, ctx, kind="log", coverage=coverage,
         )

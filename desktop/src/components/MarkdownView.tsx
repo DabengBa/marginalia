@@ -33,15 +33,17 @@ import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 
-/** Deep-link position on top of an `entry:<uuid>` citation. runtime.py
- *  rewrites the agent's footnote definitions into one of three URL shapes:
- *    text / md / OOXML:  ?q=<urlencoded verbatim excerpt>
- *    PDF:                ?page=<n>
- *    legacy / manual:    ?line=<start>-<end>  (still tolerated)
- *  The receiving handler maps these onto FileViewer's matching jump modes. */
+/** Deep-link position on top of an `entry:<uuid>` citation. Locator fields
+ *  are intentionally independent because Office citations combine them, for
+ *  example `sheet+cell+quote` or `page+quote`. */
 export interface EntryLocator {
-  kind: "quote" | "line" | "page";
-  value: string;
+  quote?: string;
+  line?: string;
+  page?: string;
+  block?: string;
+  sheet?: string;
+  cell?: string;
+  row?: string;
 }
 
 function parseEntryHref(href: string): { id: string; locator?: EntryLocator } {
@@ -50,25 +52,28 @@ function parseEntryHref(href: string): { id: string; locator?: EntryLocator } {
   if (q === -1) return { id: tail };
   const id = tail.slice(0, q);
   const params = new URLSearchParams(tail.slice(q + 1));
-  const quote = params.get("q");
-  if (quote) return { id, locator: { kind: "quote", value: quote } };
-  const line = params.get("line");
-  if (line) return { id, locator: { kind: "line", value: line } };
-  const page = params.get("page");
-  if (page) return { id, locator: { kind: "page", value: page } };
-  return { id };
+  const locator: EntryLocator = {};
+  const assign = (key: keyof EntryLocator, param: string) => {
+    const value = params.get(param);
+    if (value) locator[key] = value;
+  };
+  assign("quote", "q");
+  assign("line", "line");
+  assign("page", "page");
+  assign("block", "block");
+  assign("sheet", "sheet");
+  assign("cell", "cell");
+  assign("row", "row");
+  return Object.keys(locator).length > 0 ? { id, locator } : { id };
 }
 
 interface Props {
   content: string;
   /** Called when the user clicks an `entry:<uuid>` link (citation
    *  footnote in chat answers). `locator` carries the optional deep-link
-   *  position from the URL query string — `?q=<text>` yields
-   *  `{kind: "quote", value}`, `?line=10-40` yields `{kind: "line", value}`,
-   *  `?page=3` yields `{kind: "page", value}`. Handlers route to
-   *  /library?entry=... with the locator forwarded so the file viewer
-   *  can scroll to that position. If absent, entry: links render as
-   *  plain anchors. */
+   *  position fields from the URL query string. Handlers route to
+   *  /library?entry=... with every field preserved so the file viewer can
+   *  navigate and highlight in one operation. */
   onEntryLink?: (entryId: string, locator?: EntryLocator) => void;
   /** Tailwind class for the wrapping div. Defaults to `prose-marginalia`. */
   className?: string;

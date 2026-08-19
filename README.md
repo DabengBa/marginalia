@@ -218,6 +218,7 @@ MARGINALIA_HOME=./runtime/eval/scifact EMBEDDING_API_KEY=... marginalia eval bui
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever search_metadata --k 10,50,100 --json report.json
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever semantic_recall --k 10,50,100
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval ablation-run scifact --k 10,50,100 --json ablation-report.json
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval load-run scifact --retriever recall_knowledge --requests 1000 --concurrency 20 --max-p95-ms 1500 --min-hit-at-k 0.90 --json load-report.json
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer scifact --retriever recall_knowledge --query-id <qid> --timeout-seconds 300
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer-run scifact --retriever recall_knowledge --qrels-only --query-limit 20 --concurrency 10 --json answer-report.json
 MARGINALIA_HOME=./runtime/eval/scifact marginalia eval compare-report scifact --query-limit 30 --concurrency 3 --json compare-report.json
@@ -239,12 +240,31 @@ dependency is installed, the semantic index also writes `vectors.sqlite` and
 search uses it before falling back to the file index. Install with
 `pip install -e ".[semantic]"`, or set `SEMANTIC_INDEX_BACKEND=file` to keep
 only the file backend.
+Whole-library rebuilds read database rows in bounded pages controlled by
+`SEMANTIC_REBUILD_PAGE_SIZE`. Lexical candidates without a section locator can
+receive the best scoped semantic section when its cosine score reaches
+`SECTION_BACKFILL_MIN_SCORE`, improving rerank evidence and citation precision
+without adding unrelated candidates.
+Content-addressed duplicate uploads never revive soft-deleted file rows. A
+duplicate of failed or incomplete content resumes ingest; a duplicate of ready
+content schedules a file-scoped semantic refresh. That refresh reuses an
+existing vector only when its provider, model, dimensions, and section text
+hash match the current embedding configuration.
 Optional reranking can refine the merged candidate pool before evidence
 selection. Enable it with `RERANK_ENABLED=true`, `RERANK_API_KEY=...`, and
 optionally `RERANK_MODEL=qwen3-rerank`. Rerank credentials are also separate
 from `LLM_*`; no chat or vision key is reused implicitly. Evidence selection
 defaults to `EVIDENCE_SELECTION=quota`; set `EVIDENCE_SELECTION=rerank` to take
 the reranked top evidence directly.
+
+Each LLM profile can explicitly declare its request dialect, context window,
+tokenizer, image/tool/temperature support, and accepted output-token parameter.
+The settings UI exposes these fields and the runtime does not guess a gateway
+dialect from its URL. Oversized conversation requests are compacted by model
+tokens into a structured checkpoint while stored turns remain unchanged;
+`CONVERSATION_COMPACTION_*` controls this separately from evidence compression.
+Session metrics also classify prompt-cache SLO status as `met`, `breached`, or
+`insufficient_data` using the configurable `AGENT_CACHE_SLO_*` thresholds.
 The eval report treats `hit@k` and `candidate_recall@k` as the investigation
 candidate-pool metrics; MRR and nDCG are ranking-efficiency diagnostics.
 `eval ablation-run` runs the candidate-pool matrix for metadata-only,
@@ -252,6 +272,9 @@ metadata-plus-relations, hybrid semantic recall, hybrid-plus-relations,
 hybrid-plus-rerank, and full recall. It reports deltas against metadata-only
 so relation expansion, semantic recall, and rerank contributions can be
 tracked before changing the agent loop.
+`eval load-run` runs bounded concurrent retrieval requests and reports request
+rate, error rate, p50/p95/p99 latency, Hit@K, and MRR. Optional thresholds make
+the command return a non-zero exit code for repeatable scale gates.
 `eval answer` is a bounded final-answer probe: it retrieves candidates, reads
 limited source text, performs one answer-generation call, and reports whether
 the answer cited a qrels-relevant document. `eval answer-run` repeats the same
@@ -388,6 +411,9 @@ MARGINALIA_HOME=~/Marginalia
 DB_BACKEND=sqlite                  # sqlite or postgres
 STORAGE_BACKEND=mirror             # mirror, local, or s3
 WORKER_ENABLED=true
+WORKER_RETRY_BASE_SECONDS=60
+WORKER_RETRY_MAX_SECONDS=3600
+MARGINALIA_UPLOAD_MAX_BYTES=0      # per-file upload cap; 0 = unlimited
 AUTO_LIFECYCLE_ENABLED=false
 MAINTENANCE_DAILY_TOKEN_BUDGET=0  # rolling 24h background cap; 0 = unlimited
 RELATION_BACKGROUND_VETTING_ENABLED=false
@@ -414,10 +440,15 @@ RERANK_BASE_URL=https://dashscope.aliyuncs.com/compatible-api/v1
 RERANK_MODEL=qwen3-rerank
 EVIDENCE_SELECTION=quota           # quota or rerank
 
-AGENT_PLAN_MAX_TOKENS=1024
-AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_PLAN_MAX_TOKENS=2048
+AGENT_EXECUTE_MAX_TOKENS=4096
+AGENT_MAX_PARALLEL_TOOL_CALLS=8
 AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
 AGENT_FINAL_ANSWER_MAX_CHARS=120000
+
+LLM_INGEST_MAX_TOKENS=1200
+LLM_INGEST_CONCURRENCY=4
+LLM_VISION_SUPPORTS_VISION=true
 
 # Built-in compression.
 COMPRESSION_ENABLED=true
@@ -445,6 +476,35 @@ that seed's direct raw edges, or set `RELATION_BACKGROUND_VETTING_ENABLED=true`
 if you want the periodic worker to batch-vet relation edges ahead of time.
 
 When a long final answer hits the model token limit, Marginalia can continue it server-side and emit one merged answer event to the GUI. Tune `AGENT_FINAL_ANSWER_CONTINUE_TURNS` and `AGENT_FINAL_ANSWER_MAX_CHARS` for research-heavy deployments.
+
+### Reliability and recovery
+
+Each claimed task receives a unique delivery-owner token. Heartbeats,
+completion, retries, and expired-lease recovery must still match that owner
+and the expected lease, so a stalled worker cannot complete or retry work after
+another worker has reclaimed it. Losing ownership also cancels the old local
+handler. Retry delays grow exponentially between
+`WORKER_RETRY_BASE_SECONDS` and `WORKER_RETRY_MAX_SECONDS`; periodic dispatcher
+ticks use time-slot keys so the running tick cannot consume its successor.
+During schema bootstrap, legacy duplicate active dedup keys are collapsed to
+the best executable task before the uniqueness constraint is installed.
+
+`MARGINALIA_UPLOAD_MAX_BYTES` is checked while multipart data is streaming,
+before Starlette spools the file. File bytes are counted independently from a
+bounded amount of form metadata. Upload commit ambiguity triggers compensating
+cleanup, local `.part` files are removed, failed S3 multipart uploads are
+aborted, and physical object deletion is represented by a persistent retryable
+task. PostgreSQL deployments also use transaction advisory locks for
+conflicting tool scopes and for concurrent turns in the same session.
+
+The intentionally unsupported service-runtime layer is limited to features
+that require a different multi-tenant data model: organizations and users,
+ACL/RLS isolation, shared knowledge-base slugs, a persistent agent event inbox,
+provider-attempt envelope tables, replayable durable SSE operations, and
+reconciliation with an external job-queue database. Marginalia instead keeps
+its single-library ownership model, streams chat from the active request, and
+polls its own `tasks` table; emulating those service abstractions would weaken
+rather than complete the existing architecture.
 
 ## Storage and Deployment
 

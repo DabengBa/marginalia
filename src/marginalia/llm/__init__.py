@@ -13,8 +13,13 @@ from marginalia.llm.factory import (
 )
 from marginalia.llm.prompt_cache import (
     CACHE_PREFIX_ACK,
+    PromptPrefixObservation,
+    PromptPrefixTracker,
+    PromptPrefixViolation,
     cacheable_prefix_messages,
     cacheable_prompt_messages,
+    canonical_prompt_fingerprint,
+    serialize_chat_message,
 )
 from marginalia.llm.types import (
     ChatMessage,
@@ -39,6 +44,9 @@ __all__ = [
     "ChatResponse",
     "ContentBlock",
     "CACHE_PREFIX_ACK",
+    "PromptPrefixObservation",
+    "PromptPrefixTracker",
+    "PromptPrefixViolation",
     "ImageBlock",
     "StopReason",
     "TextBlock",
@@ -49,7 +57,9 @@ __all__ = [
     "ToolUseBlock",
     "cacheable_prefix_messages",
     "cacheable_prompt_messages",
+    "canonical_prompt_fingerprint",
     "get_audio_client",
     "get_chat_client",
     "reset_clients_cache",
+    "serialize_chat_message",
 ]

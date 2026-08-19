@@ -25,6 +25,8 @@ from marginalia.eval.core import (
     run_answer_probe,
     run_eval_ablation_dataset,
     run_eval_dataset,
+    run_load_eval_dataset,
+    run_load_eval_with_retriever,
     run_report_compare_dataset,
 )
 
@@ -53,5 +55,7 @@ __all__ = [
     "run_answer_probe",
     "run_eval_ablation_dataset",
     "run_eval_dataset",
+    "run_load_eval_dataset",
+    "run_load_eval_with_retriever",
     "run_report_compare_dataset",
 ]

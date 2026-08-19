@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.agent.tools import ToolContext, tool
+from marginalia.agent.tools import ToolContext, ToolPolicy, tool
 from marginalia.db.models import View
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
@@ -50,6 +50,7 @@ SCHEMA: dict[str, Any] = {
         "pair with read_entries_metadata for detail."
     ),
     schema=SCHEMA,
+    policy=ToolPolicy(),
 )
 async def materialize_view(
     db: AsyncSession,

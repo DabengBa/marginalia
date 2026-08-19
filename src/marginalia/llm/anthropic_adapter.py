@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any
 
-from anthropic import AsyncAnthropic, BadRequestError
+from anthropic import BadRequestError
 
 from marginalia.config import LlmProfile
 from marginalia.llm.base import ChatClient
@@ -38,6 +38,7 @@ from marginalia.llm.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from marginalia.provider_clients import get_anthropic_client
 
 log = logging.getLogger(__name__)
 
@@ -51,14 +52,17 @@ class AnthropicChatClient(ChatClient):
         self.profile_name = profile.name
         self.provider = profile.provider
         self.model = profile.model
-        kwargs: dict[str, Any] = {"api_key": profile.api_key}
-        if profile.base_url:
-            kwargs["base_url"] = profile.base_url
-        self._client = AsyncAnthropic(**kwargs)
+        self.capabilities = profile.capabilities
+        self._client = get_anthropic_client(
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+        )
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         if request.tools and request.json_schema:
             raise ValueError("ChatRequest.tools and json_schema are mutually exclusive")
+        if int(request.max_tokens) <= 0:
+            raise ValueError("Anthropic chat completions require a positive max_tokens")
 
         messages = self._render_messages(request)
 
@@ -66,8 +70,14 @@ class AnthropicChatClient(ChatClient):
             "model": self.model,
             "messages": messages,
             "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
         }
+        if self.capabilities.supports_temperature and not (
+            request.reasoning_effort
+            and request.reasoning_effort.strip().lower() != "none"
+        ):
+            kwargs["temperature"] = request.temperature
+        if request.tools and not self.capabilities.supports_tools:
+            raise ValueError(f"profile {self.profile_name} does not support tool calling")
 
         system = self._render_system(request)
         if system is not None:
@@ -233,6 +243,11 @@ class AnthropicChatClient(ChatClient):
             output_tokens=getattr(usage_obj, "output_tokens", 0) or 0,
             cache_read_tokens=getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
             cache_creation_tokens=getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+            prompt_tokens=(
+                (getattr(usage_obj, "input_tokens", 0) or 0)
+                + (getattr(usage_obj, "cache_read_input_tokens", 0) or 0)
+                + (getattr(usage_obj, "cache_creation_input_tokens", 0) or 0)
+            ),
         )
 
         return ChatResponse(

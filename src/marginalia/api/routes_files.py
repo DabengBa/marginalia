@@ -16,37 +16,30 @@ file_ids and chunk the commits.
 """
 from __future__ import annotations
 
-import logging
+import json
+from hashlib import sha256
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.config import get_settings
 from marginalia.db.models import File
 from marginalia.db.models.enums import INGEST_STATUSES
 from marginalia.db.session import get_session
 from marginalia.repositories import catalogs as catalogs_repo
-from marginalia.repositories import files as files_repo
 from marginalia.repositories import folders as folders_repo
-from marginalia.services.reprocess import reprocess_file
-
-log = logging.getLogger(__name__)
+from marginalia.repositories import tasks as tasks_repo
+from marginalia.services.reprocess import (
+    bulk_reprocess_file_ids_statement,
+    reprocess_file,
+)
+from marginalia.tasks.enqueue import enqueue
+from marginalia.tasks.kinds import KIND_BULK_REPROCESS_FILES
 
 router = APIRouter(prefix="/files", tags=["files"])
-
-# Bulk fanout commit chunk size. Each file = ~6 SQL ops (UPDATE File +
-# DELETE entry_tags + audit + dedup SELECT + Task INSERT + audit). With
-# SQLite a 50-file chunk is well under a second; with Postgres even
-# faster. Smaller chunks = more frequent unlocks for concurrent ingest
-# workers.
-_BULK_CHUNK = 50
-
-# Hard cap on a single bulk request. Keeps any one user from accidentally
-# nuking a 100k-file library in one HTTP call. If a real workflow needs
-# more, do it in multiple requests.
-_BULK_MAX = 5000
-
 
 @router.post("/{file_id}/reprocess", status_code=200)
 async def reprocess_one(
@@ -101,81 +94,93 @@ class BulkReprocessBody(BaseModel):
         return self
 
 
-async def _resolve_file_ids(
-    session: AsyncSession, body: BulkReprocessBody,
-) -> list[str]:
+async def _bulk_reprocess_payload(
+    session: AsyncSession,
+    body: BulkReprocessBody,
+) -> dict[str, Any]:
+    payload = body.model_dump(exclude_none=True)
     if body.file_ids is not None:
-        # Filter to live ids — caller may have cached stale ids.
-        rows = await files_repo.list_live_ids(
-            session, ingest_status=body.status,
+        payload["file_ids"] = list(dict.fromkeys(body.file_ids))
+    elif body.catalog_id is not None:
+        if await catalogs_repo.get_live(session, body.catalog_id) is None:
+            raise HTTPException(status_code=404, detail="catalog not found")
+        payload["catalog_ids"] = await catalogs_repo.expand_subtree(
+            session,
+            body.catalog_id,
         )
-        live = set(rows)
-        return [fid for fid in body.file_ids if fid in live]
-    if body.catalog_id is not None:
-        subtree = await catalogs_repo.expand_subtree(session, body.catalog_id)
-        return await files_repo.list_live_ids_in_catalogs(
-            session, subtree, ingest_status=body.status,
+    elif body.folder_id is not None:
+        if await folders_repo.get_live(session, body.folder_id) is None:
+            raise HTTPException(status_code=404, detail="folder not found")
+        payload["folder_ids"] = await folders_repo.list_live_descendant_ids(
+            session,
+            body.folder_id,
         )
-    if body.folder_id is not None:
-        # Walk folder subtree, then scope file_entries by folder.
-        descendants = await folders_repo.list_live_descendant_ids(
-            session, body.folder_id,
-        )
-        return await files_repo.list_live_ids_in_folders(
-            session, [body.folder_id, *descendants], ingest_status=body.status,
-        )
-    if body.tag_id is not None:
-        return await files_repo.list_live_ids_with_tag(
-            session, body.tag_id, ingest_status=body.status,
-        )
-    if body.all or body.status is not None:
-        return await files_repo.list_live_ids(session, ingest_status=body.status)
-    return []
+    payload["scheduled_by"] = _reprocess_scope_name(body)
+    payload["page_size"] = get_settings().bulk_reprocess_page_size
+    return payload
 
 
-@router.post("/reprocess", status_code=200)
+def _reprocess_scope_name(body: BulkReprocessBody) -> str:
+    if body.file_ids is not None:
+        base = "file_ids"
+    elif body.catalog_id is not None:
+        base = "catalog_id"
+    elif body.folder_id is not None:
+        base = "folder_id"
+    elif body.tag_id is not None:
+        base = "tag_id"
+    elif body.all:
+        base = "all"
+    else:
+        base = "status"
+    return f"{base}:status={body.status}" if body.status else base
+
+
+@router.post("/reprocess", status_code=202)
 async def reprocess_bulk(
     body: BulkReprocessBody,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    file_ids = await _resolve_file_ids(session, body)
-    if not file_ids:
-        return {
-            "file_count": 0,
-            "task_ids": [],
-            "reused_count": 0,
-            "skipped_count": 0,
-            "status_filter": body.status,
-        }
-    if len(file_ids) > _BULK_MAX:
-        raise HTTPException(
-            status_code=413,
-            detail=f"bulk reprocess limited to {_BULK_MAX} files per request "
-                   f"(got {len(file_ids)})",
-        )
-
-    task_ids: list[str] = []
-    reused_count = 0
-    skipped_count = 0
-
-    for i in range(0, len(file_ids), _BULK_CHUNK):
-        chunk = file_ids[i : i + _BULK_CHUNK]
-        for fid in chunk:
-            file_row = await session.get(File, fid)
-            if file_row is None or file_row.deleted_at is not None:
-                skipped_count += 1
-                continue
-            tid = await reprocess_file(session, file_row)
-            if tid is None:
-                reused_count += 1
-            else:
-                task_ids.append(tid)
-        await session.commit()
-
+    payload = await _bulk_reprocess_payload(session, body)
+    count_stmt = bulk_reprocess_file_ids_statement(payload=payload).order_by(None)
+    file_count = int((await session.execute(
+        select(func.count()).select_from(count_stmt.subquery())
+    )).scalar_one())
+    fingerprint_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"checkpoint", "dispatcher_task_id"}
+    }
+    fingerprint = sha256(json.dumps(
+        fingerprint_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    dedup_key = f"bulk_reprocess_files:{fingerprint}"
+    existing = await tasks_repo.find_pending_or_running_by_dedup(session, dedup_key)
+    task = await enqueue(
+        session,
+        kind=KIND_BULK_REPROCESS_FILES,
+        payload=payload,
+        dedup_key=dedup_key,
+        priority=55,
+        max_attempts=20,
+    )
+    if task is None:
+        raise HTTPException(status_code=409, detail="bulk reprocess could not be scheduled")
+    reused = existing is not None
+    if not reused:
+        task.payload = {**payload, "dispatcher_task_id": task.id}
+    await session.commit()
     return {
-        "file_count": len(file_ids),
-        "task_ids": task_ids,
-        "reused_count": reused_count,
-        "skipped_count": skipped_count,
+        "dispatcher_task_id": task.id,
+        "file_count": file_count,
+        "task_ids": [task.id],
+        "reused": reused,
+        "reused_count": int(reused),
+        "skipped_count": 0,
+        "scope": _reprocess_scope_name(body),
+        "status": "scheduled",
         "status_filter": body.status,
     }

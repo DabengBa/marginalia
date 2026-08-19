@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from marginalia.agent.runtime import run_turn
+from marginalia.agent.tool_locks import session_execution_lock
 from marginalia.agent.types import AgentTurnError, ChatMode, RunOptions
 from marginalia.config import get_settings
 from marginalia.llm import ImageBlock
@@ -73,6 +75,15 @@ def _lock_for(session_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _SESSION_LOCKS[session_id] = lock
     return lock
+
+
+@asynccontextmanager
+async def _turn_lock(session_id: str):
+    """Serialize a session locally and across PostgreSQL worker processes."""
+    async with _lock_for(session_id):
+        async with session_scope() as lock_db:
+            async with session_execution_lock(lock_db, session_id=session_id):
+                yield
 
 
 _ALLOWED_IMAGE_MEDIA_TYPES: frozenset[str] = frozenset({
@@ -213,14 +224,13 @@ async def post_chat(
     images = _validate_chat_images(body.images)
 
     user_message = body.query
-    lock = _lock_for(session_id)
 
     async def event_stream() -> AsyncIterator[dict[str, str]]:
         # Hold the lock for the WHOLE turn — plan + execute + finalize
         # all touch shared per-session state (conversation rows, journal
         # via reflect, session-level counters). Releasing earlier would
         # let a concurrent request see partial state.
-        async with lock:
+        async with _turn_lock(session_id):
             conversation_id: str | None = None
             timeout_seconds = get_settings().agent_turn_timeout_seconds
             try:

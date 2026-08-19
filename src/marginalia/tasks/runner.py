@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from marginalia.config import LlmConfigError, Settings, get_settings, validate_llm_config
@@ -31,9 +32,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _backoff(attempts: int) -> timedelta:
-    base = min(60 * (2 ** max(0, attempts - 1)), 60 * 60)
-    return timedelta(seconds=base)
+def _backoff(attempts: int, settings: Settings) -> timedelta:
+    exponent = min(max(0, attempts - 1), 63)
+    seconds = min(
+        settings.worker_retry_base_seconds * (2**exponent),
+        settings.worker_retry_max_seconds,
+    )
+    return timedelta(seconds=seconds)
 
 
 class TaskRunner:
@@ -46,6 +51,11 @@ class TaskRunner:
         self._stop = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
         self._inflight: set[asyncio.Task[None]] = set()
+        # A process may reclaim a task while the coroutine from an expired
+        # delivery is still winding down.  Give every delivery its own owner
+        # token so the stale coroutine cannot heartbeat or finish the new
+        # lease merely because both deliveries ran in this process.
+        self._claim_owners: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._loop_task is not None:
@@ -138,7 +148,13 @@ class TaskRunner:
                 continue
             log.info("claimed %d task(s): %s", len(claimed), ", ".join(claimed))
             for task_id in claimed:
-                t = asyncio.create_task(self._process(task_id))
+                owner_id = self._claim_owners.pop(task_id, None)
+                if owner_id is None:
+                    # Keep test/custom claimers that return plain ids
+                    # compatible with the runner's original extension seam.
+                    t = asyncio.create_task(self._process(task_id))
+                else:
+                    t = asyncio.create_task(self._process(task_id, owner_id))
                 self._inflight.add(t)
                 t.add_done_callback(self._inflight.discard)
         log.info("TaskRunner %s stopped", self.worker_id)
@@ -161,29 +177,58 @@ class TaskRunner:
             if not rows:
                 await session.commit()
                 return []
-            claimed = await tasks_repo.mark_running(
-                session,
-                ids=rows,
-                now=now,
-                lease_until=lease_until,
-                worker_id=self.worker_id,
-            )
+            claimed: list[str] = []
+            owners: dict[str, str] = {}
+            for task_id in rows:
+                owner_id = self._new_claim_owner()
+                changed = await tasks_repo.mark_running(
+                    session,
+                    ids=[task_id],
+                    now=now,
+                    lease_until=lease_until,
+                    worker_id=owner_id,
+                )
+                if changed:
+                    claimed.extend(changed)
+                    owners.update(dict.fromkeys(changed, owner_id))
             await session.commit()
-            return list(claimed)
+            self._claim_owners.update(owners)
+            return claimed
 
-    async def _process(self, task_id: str) -> None:
+    def _new_claim_owner(self) -> str:
+        # Task.locked_by is VARCHAR(64).  Retain a readable worker prefix and
+        # reserve 33 characters for ':' plus the UUID delivery nonce.
+        return f"{self.worker_id[:31]}:{uuid.uuid4().hex}"
+
+    async def _process(self, task_id: str, owner_id: str | None = None) -> None:
+        owner_id = owner_id or self._claim_owners.pop(task_id, None) or self.worker_id
         async with session_scope() as session:
             task = await tasks_repo.get(session, task_id)
-            if task is None or task.status != "running":
+            if (
+                task is None
+                or task.status != "running"
+                or task.locked_by != owner_id
+            ):
                 return
             handler = get_handler(task.kind)
             payload = dict(task.payload or {})
             attempts = task.attempts
             max_attempts = task.max_attempts
             kind = task.kind
+            # Handlers normally consume only their public payload. Reserved
+            # runtime fields let resumable work bind checkpoints to the exact
+            # task row without changing every handler signature.
+            payload.setdefault("_task_id", task_id)
+            payload.setdefault("_task_attempt", attempts)
 
         if handler is None:
-            await self._fail(task_id, attempts, max_attempts, f"no handler registered for {kind!r}")
+            await self._fail(
+                task_id,
+                attempts,
+                max_attempts,
+                f"no handler registered for {kind!r}",
+                owner_id,
+            )
             return
 
         log.info(
@@ -200,20 +245,51 @@ class TaskRunner:
         # rows queued before bootstrap was guarded, plus anything
         # enqueued by future code paths that forget to check first.
         if kind in LLM_DEPENDENT_KINDS and not self._has_llm_key():
-            await self._fail(task_id, max_attempts, max_attempts, _NO_LLM_KEY_ERROR)
+            await self._fail(
+                task_id,
+                max_attempts,
+                max_attempts,
+                _NO_LLM_KEY_ERROR,
+                owner_id,
+            )
             return
 
         token = bind_accumulator()
         started = time.monotonic()
-        heartbeat = asyncio.create_task(self._heartbeat(task_id))
+        handler_task = asyncio.create_task(
+            handler(payload),
+            name=f"marginalia.task_handler.{kind}.{task_id}",
+        )
+        heartbeat = asyncio.create_task(
+            self._heartbeat(task_id, owner_id, handler_task)
+        )
         try:
-            await handler(payload)
+            await handler_task
+        except asyncio.CancelledError:
+            # A failed fenced heartbeat means another delivery now owns this
+            # row. Stop cooperative handler work promptly and leave all queue
+            # transitions to the current owner. Any already-committed handler
+            # effects must remain idempotent, but this prevents further calls
+            # after ownership loss.
+            unbind_accumulator(token)
+            log.warning(
+                "task %s (%s) cancelled after delivery ownership was lost",
+                task_id,
+                kind,
+            )
+            return
         except Exception as exc:
             heartbeat.cancel()
             log.exception("task %s (%s) failed", task_id, kind)
             duration_ms = int((time.monotonic() - started) * 1000)
             counters = unbind_accumulator(token) or UsageCounters()
-            changed = await self._fail(task_id, attempts, max_attempts, repr(exc))
+            changed = await self._fail(
+                task_id,
+                attempts,
+                max_attempts,
+                repr(exc),
+                owner_id,
+            )
             if changed:
                 await self._record_outcome(
                     task_id=task_id, kind=kind, outcome="error",
@@ -230,7 +306,7 @@ class TaskRunner:
                 session,
                 task_id=task_id,
                 now=_now(),
-                worker_id=self.worker_id,
+                worker_id=owner_id,
             )
             if changed:
                 await outcomes_repo.record_outcome(
@@ -262,7 +338,13 @@ class TaskRunner:
         except Exception:
             log.exception("failed to record task_outcome for %s", task_id)
 
-    async def _heartbeat(self, task_id: str) -> None:
+    async def _heartbeat(
+        self,
+        task_id: str,
+        owner_id: str | None = None,
+        handler_task: asyncio.Task[None] | None = None,
+    ) -> None:
+        owner_id = owner_id or self.worker_id
         try:
             while True:
                 settings = self._current_settings()
@@ -270,21 +352,36 @@ class TaskRunner:
                 await asyncio.sleep(interval)
                 async with session_scope() as session:
                     now = _now()
-                    await tasks_repo.heartbeat(
+                    changed = await tasks_repo.heartbeat(
                         session,
                         task_id=task_id,
                         lease_until=now + timedelta(
                             seconds=settings.worker_lease_seconds,
                         ),
                         now=now,
+                        worker_id=owner_id,
                     )
                     await session.commit()
+                    if not changed:
+                        log.warning(
+                            "task %s lost delivery lease; heartbeat stopped",
+                            task_id,
+                        )
+                        if handler_task is not None and not handler_task.done():
+                            handler_task.cancel("task delivery lease lost")
+                        return
         except asyncio.CancelledError:
             return
 
     async def _fail(
-        self, task_id: str, attempts: int, max_attempts: int, error: str
+        self,
+        task_id: str,
+        attempts: int,
+        max_attempts: int,
+        error: str,
+        owner_id: str | None = None,
     ) -> bool:
+        owner_id = owner_id or self.worker_id
         async with session_scope() as session:
             task = await tasks_repo.get(session, task_id)
             if attempts >= max_attempts:
@@ -293,7 +390,7 @@ class TaskRunner:
                     task_id=task_id,
                     now=_now(),
                     error=error,
-                    worker_id=self.worker_id,
+                    worker_id=owner_id,
                 )
                 if changed and task is not None:
                     await mark_file_failed_for_dead_ingest_task(
@@ -313,13 +410,16 @@ class TaskRunner:
                         error,
                     )
             else:
-                next_run_at = _now() + _backoff(attempts)
+                next_run_at = _now() + _backoff(
+                    attempts,
+                    self._current_settings(),
+                )
                 changed = await tasks_repo.reschedule_for_retry(
                     session,
                     task_id=task_id,
                     error=error,
                     next_run_at=next_run_at,
-                    worker_id=self.worker_id,
+                    worker_id=owner_id,
                 )
                 if changed:
                     log.warning(

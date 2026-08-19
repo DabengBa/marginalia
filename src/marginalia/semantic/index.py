@@ -34,13 +34,14 @@ from marginalia.repositories import files as files_repo
 from marginalia.semantic.embeddings import EmbeddingResult, get_embedding_client
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 DEFAULT_INDEX_NAME = "default"
 SQLITE_VEC_INDEX_FILENAME = "vectors.sqlite"
 # Cap the per-entry text handed to the embedding API. A long PDF whose
 # description accumulated many chunked sections can otherwise exceed the
 # provider token limit and make the whole batch (and thus the build) fail.
 EMBEDDING_TEXT_MAX_CHARS = 6000
+SECTION_EMBEDDING_MAX_SECTIONS = 200
 
 
 class EmbeddingClient(Protocol):
@@ -74,6 +75,7 @@ class SemanticIndexRefreshResult:
     entries_total: int
     total_tokens: int
     skipped_reason: str | None = None
+    vectors_reused: int = 0
 
 
 @dataclass(slots=True)
@@ -81,6 +83,16 @@ class SemanticHit:
     entry_id: str
     score: float
     rank: int
+    section_id: str | None = None
+
+
+@dataclass(slots=True)
+class _SemanticInput:
+    entry: FileEntry
+    file_row: File
+    record_id: str
+    section_id: str | None
+    text: str
 
 
 @dataclass(slots=True)
@@ -120,9 +132,12 @@ def semantic_index_status(index_name: str = DEFAULT_INDEX_NAME) -> dict[str, Any
         "model": manifest.get("model") if manifest else None,
         "dimensions": manifest.get("dimensions") if manifest else None,
         "entries": manifest.get("entries") if manifest else 0,
+        "documents": manifest.get("documents") if manifest else 0,
+        "section_entries": manifest.get("section_entries") if manifest else 0,
         "configured_provider": settings.embedding_provider,
         "configured_model": settings.embedding_model,
         "configured_dimensions": settings.embedding_dimensions,
+        "rebuild_page_size": settings.semantic_rebuild_page_size,
         "compatible": compatible,
         "needs_rebuild": exists and not compatible,
     }
@@ -229,8 +244,10 @@ async def build_semantic_index(
     batch_size: int | None = None,
     concurrency: int = 1,
     resume: bool = False,
+    resume_key: str | None = None,
     client: EmbeddingClient | None = None,
     progress_every: int = 50,
+    page_size: int | None = None,
 ) -> SemanticIndexBuildResult:
     if entry_ids is not None:
         # Materialize once (callers may pass a generator) so the emptiness
@@ -260,8 +277,10 @@ async def build_semantic_index(
                 batch_size=batch_size,
                 concurrency=concurrency,
                 resume=resume,
+                resume_key=resume_key,
                 client=client,
                 progress_every=progress_every,
+                page_size=page_size,
             )
 
 
@@ -273,46 +292,61 @@ async def _build_semantic_index(
     batch_size: int | None = None,
     concurrency: int = 1,
     resume: bool = False,
+    resume_key: str | None = None,
     client: EmbeddingClient | None = None,
     progress_every: int = 50,
+    page_size: int | None = None,
 ) -> SemanticIndexBuildResult:
     settings = get_settings()
     client = client or get_embedding_client(settings)
     batch_size = max(1, int(batch_size or settings.embedding_batch_size or 10))
     concurrency = max(1, int(concurrency or 1))
+    page_size = max(1, int(page_size or settings.semantic_rebuild_page_size))
     started = time.monotonic()
-    pairs = await _load_indexable_entries(
-        session, list(entry_ids) if entry_ids is not None else None,
-    )
+    explicit_records: list[_SemanticInput] | None = None
+    if entry_ids is not None:
+        pairs = await _load_indexable_entries(session, list(entry_ids))
+        explicit_records = _semantic_inputs(pairs)
     out_dir = semantic_index_dir(index_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     total_tokens = 0
+    model = settings.embedding_model
+    resume_suffix = (
+        "." + sha256(str(resume_key).encode("utf-8")).hexdigest()[:16]
+        if resume_key
+        else ""
+    )
+    resume_meta = out_dir / f"entries.jsonl{resume_suffix}.tmp"
+    resume_vec = out_dir / f"vectors.f32{resume_suffix}.tmp"
     count, dimensions, done_ids = _resume_state(
-        out_dir / "entries.jsonl.tmp",
-        out_dir / "vectors.f32.tmp",
-        requested_ids=[entry.id for entry, _file in pairs],
+        resume_meta,
+        resume_vec,
+        requested_ids=(
+            [record.record_id for record in explicit_records]
+            if explicit_records is not None else None
+        ),
         resume=resume,
+        expected_provider=settings.embedding_provider,
+        expected_model=model,
+        expected_dimensions=settings.embedding_dimensions,
     )
     if resume:
-        # Fixed tmp names so an interrupted --resume run can be picked up by
-        # the next one. Resume is an explicit CLI operation; the concurrent
-        # task paths always build with resume=False.
-        tmp_meta = out_dir / "entries.jsonl.tmp"
-        tmp_vec = out_dir / "vectors.f32.tmp"
+        # A CLI resume uses the historical fixed names. Background tasks use a
+        # key derived from the task id, so only retries of that task can adopt
+        # its partial vectors.
+        tmp_meta = resume_meta
+        tmp_vec = resume_vec
     else:
         # Unique per-process tmp names: the asyncio lock only serializes one
         # loop, so another process must not truncate this writer's tmp files.
         tmp_meta = out_dir / f"entries.jsonl.{os.getpid()}.tmp"
         tmp_vec = out_dir / f"vectors.f32.{os.getpid()}.tmp"
-    model = settings.embedding_model
-    pending_pairs = [
-        (entry, file_row)
-        for entry, file_row in pairs
-        if entry.id not in done_ids
-    ]
-
     if resume and count:
-        print(f"  resuming semantic index with {count}/{len(pairs)} entries")
+        suffix = (
+            f"/{len(explicit_records)}"
+            if explicit_records is not None else ""
+        )
+        print(f"  resuming semantic index with {count}{suffix} vectors")
 
     # Append only when _resume_state actually accepted the tmp files; a
     # rejected state (empty done_ids) must be truncated, not appended to.
@@ -323,48 +357,70 @@ async def _build_semantic_index(
     manifest_tmp = out_dir / f"manifest.json.{os.getpid()}.tmp"
     try:
         with tmp_meta.open(text_mode, encoding="utf-8") as meta_f, tmp_vec.open(mode) as vec_f:
-            batches = [
-                pending_pairs[start:start + batch_size]
-                for start in range(0, len(pending_pairs), batch_size)
-            ]
-            for batch_group_start in range(0, len(batches), concurrency):
-                batch_group = batches[batch_group_start:batch_group_start + concurrency]
-                tasks = [
-                    _embed_batch(client, batch)
-                    for batch in batch_group
+            seen_record_ids: set[str] = set()
+            async for record_page in _iter_semantic_input_pages(
+                session,
+                explicit_records=explicit_records,
+                page_size=page_size,
+            ):
+                seen_record_ids.update(record.record_id for record in record_page)
+                pending_records = [
+                    record
+                    for record in record_page
+                    if record.record_id not in done_ids
                 ]
-                for batch, texts, result in await asyncio.gather(*tasks):
-                    total_tokens += result.total_tokens
-                    if len(result.vectors) != len(batch):
-                        raise RuntimeError(
-                            "embedding response count mismatch: "
-                            f"expected {len(batch)}, got {len(result.vectors)}"
-                        )
-                    for (entry, file_row), text, vector in zip(batch, texts, result.vectors):
-                        if not vector:
-                            continue
-                        if dimensions == 0:
-                            dimensions = len(vector)
-                        if len(vector) != dimensions:
+                batches = [
+                    pending_records[start:start + batch_size]
+                    for start in range(0, len(pending_records), batch_size)
+                ]
+                for batch_group_start in range(0, len(batches), concurrency):
+                    batch_group = batches[
+                        batch_group_start:batch_group_start + concurrency
+                    ]
+                    tasks = [_embed_batch(client, batch) for batch in batch_group]
+                    for batch, texts, result in await asyncio.gather(*tasks):
+                        total_tokens += result.total_tokens
+                        if len(result.vectors) != len(batch):
                             raise RuntimeError(
-                                f"embedding dimension changed from {dimensions} to {len(vector)}"
+                                "embedding response count mismatch: "
+                                f"expected {len(batch)}, got {len(result.vectors)}"
                             )
-                        vector = _normalize(vector)
-                        vec_f.write(struct.pack(f"<{dimensions}f", *vector))
-                        meta_f.write(json.dumps({
-                            "entry_id": entry.id,
-                            "file_id": file_row.id,
-                            "display_name": entry.display_name,
-                            "text_hash": sha256(text.encode("utf-8")).hexdigest(),
-                            "updated_at": str(max(entry.updated_at, file_row.updated_at)),
-                        }, ensure_ascii=False) + "\n")
-                        count += 1
-                    meta_f.flush()
-                    vec_f.flush()
-                    if progress_every and count and (
-                        count % progress_every == 0 or count >= len(pairs)
-                    ):
-                        print(f"  embedded {count}/{len(pairs)} entries")
+                        for record, text, vector in zip(batch, texts, result.vectors):
+                            if not vector:
+                                continue
+                            if dimensions == 0:
+                                dimensions = len(vector)
+                            if len(vector) != dimensions:
+                                raise RuntimeError(
+                                    "embedding dimension changed from "
+                                    f"{dimensions} to {len(vector)}"
+                                )
+                            vector = _normalize(vector)
+                            vec_f.write(struct.pack(f"<{dimensions}f", *vector))
+                            meta_f.write(json.dumps(
+                                _semantic_metadata(
+                                    record,
+                                    text_hash=sha256(text.encode("utf-8")).hexdigest(),
+                                    provider=settings.embedding_provider,
+                                    model=model,
+                                    dimensions=dimensions,
+                                ),
+                                ensure_ascii=False,
+                            ) + "\n")
+                            count += 1
+                        meta_f.flush()
+                        vec_f.flush()
+                        if progress_every and count and count % progress_every == 0:
+                            total_hint = (
+                                f"/{len(explicit_records)}"
+                                if explicit_records is not None else ""
+                            )
+                            print(f"  embedded {count}{total_hint} vectors")
+            if done_ids - seen_record_ids:
+                raise ValueError(
+                    "semantic resume state contains records that are no longer "
+                    "indexable; restart the rebuild without resume"
+                )
 
         if count <= 0:
             # Zero indexable entries: do NOT publish a dimensions=0 manifest.
@@ -386,6 +442,13 @@ async def _build_semantic_index(
                 skipped_reason="no_indexable_entries",
             )
 
+        published_metadata = _read_metadata(tmp_meta)
+        document_count = len({
+            str(row.get("entry_id") or "")
+            for row in published_metadata
+            if row.get("entry_id")
+        })
+        section_count = sum(bool(row.get("section_id")) for row in published_metadata)
         manifest = {
             "version": INDEX_VERSION,
             "index_name": index_name,
@@ -393,6 +456,8 @@ async def _build_semantic_index(
             "model": model,
             "dimensions": dimensions,
             "entries": count,
+            "documents": document_count,
+            "section_entries": section_count,
             "created_at_ms": int(time.time() * 1000),
         }
         manifest_tmp.write_text(
@@ -489,6 +554,7 @@ async def _refresh_semantic_index_for_file(
     # _load_indexable_entries, whose full-scan fallback would re-embed the
     # whole library after a mid-ingest soft-delete.
     pairs = await _load_indexable_entries(session, entry_ids) if entry_ids else []
+    records = _semantic_inputs(pairs)
 
     if not _semantic_index_exists(index_name):
         if not pairs:
@@ -550,6 +616,7 @@ async def _refresh_semantic_index_for_file(
             skipped_reason="full_rebuild_enqueued",
         )
     if not manifest or not _manifest_matches_settings(manifest, settings):
+        await _enqueue_full_rebuild(session, index_name)
         return SemanticIndexRefreshResult(
             index_name=index_name,
             index_dir=out_dir,
@@ -557,7 +624,7 @@ async def _refresh_semantic_index_for_file(
             entries_refreshed=0,
             entries_total=int((manifest or {}).get("entries") or 0),
             total_tokens=0,
-            skipped_reason="index_config_mismatch",
+            skipped_reason="index_config_mismatch_rebuild_enqueued",
         )
 
     dimensions = int(manifest.get("dimensions") or 0)
@@ -577,7 +644,7 @@ async def _refresh_semantic_index_for_file(
             index_name=index_name,
             index_dir=built.index_dir,
             entries_removed=0,
-            entries_refreshed=len(pairs),
+            entries_refreshed=built.entries_indexed,
             entries_total=built.entries_indexed,
             total_tokens=built.total_tokens,
         )
@@ -590,24 +657,55 @@ async def _refresh_semantic_index_for_file(
 
     kept_metadata: list[dict[str, Any]] = []
     kept_vectors = bytearray()
+    reusable_vectors: dict[str, bytes] = {}
     removed = 0
     for idx, row in enumerate(metadata[:available]):
+        start = idx * vector_bytes
+        vector = raw_vectors[start:start + vector_bytes]
+        text_hash = str(row.get("text_hash") or "")
+        if (
+            text_hash
+            and str(row.get("embedding_provider") or "")
+            == settings.embedding_provider
+            and str(row.get("embedding_model") or "") == settings.embedding_model
+            and int(row.get("embedding_dimensions") or 0) == dimensions
+            and len(vector) == vector_bytes
+        ):
+            reusable_vectors.setdefault(text_hash, vector)
         row_file_id = str(row.get("file_id") or "")
         row_entry_id = str(row.get("entry_id") or "")
         if row_file_id == file_id or row_entry_id in target_entry_ids:
             removed += 1
             continue
         kept_metadata.append(row)
-        start = idx * vector_bytes
-        kept_vectors.extend(raw_vectors[start:start + vector_bytes])
+        kept_vectors.extend(vector)
 
     refreshed_metadata: list[dict[str, Any]] = []
     refreshed_vectors = bytearray()
     total_tokens = 0
-    client = client or get_embedding_client(settings)
+    vectors_reused = 0
+    pending_records: list[_SemanticInput] = []
+    for record in records:
+        text_hash = sha256(record.text.encode("utf-8")).hexdigest()
+        reusable = reusable_vectors.get(text_hash)
+        if reusable is None:
+            pending_records.append(record)
+            continue
+        refreshed_vectors.extend(reusable)
+        refreshed_metadata.append(_semantic_metadata(
+            record,
+            text_hash=text_hash,
+            provider=settings.embedding_provider,
+            model=settings.embedding_model,
+            dimensions=dimensions,
+        ))
+        vectors_reused += 1
+
+    if pending_records:
+        client = client or get_embedding_client(settings)
     batch_size = max(1, int(settings.embedding_batch_size or 10))
-    for start in range(0, len(pairs), batch_size):
-        batch = pairs[start:start + batch_size]
+    for start in range(0, len(pending_records), batch_size):
+        batch = pending_records[start:start + batch_size]
         embedded_batch, texts, result = await _embed_batch(client, batch)
         total_tokens += result.total_tokens
         if len(result.vectors) != len(embedded_batch):
@@ -615,7 +713,7 @@ async def _refresh_semantic_index_for_file(
                 "embedding response count mismatch: "
                 f"expected {len(embedded_batch)}, got {len(result.vectors)}"
             )
-        for (entry, file_row), text, vector in zip(embedded_batch, texts, result.vectors):
+        for record, text, vector in zip(embedded_batch, texts, result.vectors):
             if not vector:
                 continue
             if len(vector) != dimensions:
@@ -624,16 +722,21 @@ async def _refresh_semantic_index_for_file(
                 )
             vector = _normalize(vector)
             refreshed_vectors.extend(struct.pack(f"<{dimensions}f", *vector))
-            refreshed_metadata.append({
-                "entry_id": entry.id,
-                "file_id": file_row.id,
-                "display_name": entry.display_name,
-                "text_hash": sha256(text.encode("utf-8")).hexdigest(),
-                "updated_at": str(max(entry.updated_at, file_row.updated_at)),
-            })
+            refreshed_metadata.append(_semantic_metadata(
+                record,
+                text_hash=sha256(text.encode("utf-8")).hexdigest(),
+                provider=settings.embedding_provider,
+                model=settings.embedding_model,
+                dimensions=dimensions,
+            ))
 
     next_metadata = kept_metadata + refreshed_metadata
     next_vectors = kept_vectors + refreshed_vectors
+    document_count = len({
+        str(row.get("entry_id") or "")
+        for row in next_metadata
+        if row.get("entry_id")
+    })
     next_manifest = {
         **manifest,
         "version": INDEX_VERSION,
@@ -642,6 +745,8 @@ async def _refresh_semantic_index_for_file(
         "model": settings.embedding_model,
         "dimensions": dimensions,
         "entries": len(next_metadata),
+        "documents": document_count,
+        "section_entries": sum(bool(row.get("section_id")) for row in next_metadata),
         "created_at_ms": int(time.time() * 1000),
     }
     _replace_file_index(
@@ -679,14 +784,40 @@ async def _refresh_semantic_index_for_file(
         entries_refreshed=len(refreshed_metadata),
         entries_total=len(next_metadata),
         total_tokens=total_tokens,
+        vectors_reused=vectors_reused,
     )
+
+
+def _semantic_metadata(
+    record: _SemanticInput,
+    *,
+    text_hash: str,
+    provider: str,
+    model: str,
+    dimensions: int,
+) -> dict[str, Any]:
+    return {
+        "record_id": record.record_id,
+        "entry_id": record.entry.id,
+        "file_id": record.file_row.id,
+        "section_id": record.section_id,
+        "display_name": record.entry.display_name,
+        "text_hash": text_hash,
+        "embedding_provider": provider,
+        "embedding_model": model,
+        "embedding_dimensions": dimensions,
+        "updated_at": str(max(
+            record.entry.updated_at,
+            record.file_row.updated_at,
+        )),
+    }
 
 
 async def _embed_batch(
     client: EmbeddingClient,
-    batch: list[tuple[FileEntry, File]],
-) -> tuple[list[tuple[FileEntry, File]], list[str], EmbeddingResult]:
-    texts = [_entry_text(entry, file_row) for entry, file_row in batch]
+    batch: list[_SemanticInput],
+) -> tuple[list[_SemanticInput], list[str], EmbeddingResult]:
+    texts = [record.text for record in batch]
     result = await client.embed(texts, text_type="document")
     return batch, texts, result
 
@@ -695,19 +826,28 @@ def _resume_state(
     meta_path: Path,
     vec_path: Path,
     *,
-    requested_ids: list[str],
+    requested_ids: list[str] | None,
     resume: bool,
+    expected_provider: str,
+    expected_model: str,
+    expected_dimensions: int,
 ) -> tuple[int, int, set[str]]:
     if not resume or not meta_path.exists() or not vec_path.exists():
         return 0, 0, set()
-    requested = set(requested_ids)
+    requested = set(requested_ids) if requested_ids is not None else None
     done_ids: set[str] = set()
     total_rows = 0
     for row in _read_metadata(meta_path):
         total_rows += 1
-        entry_id = str(row.get("entry_id") or "")
-        if entry_id in requested:
-            done_ids.add(entry_id)
+        if (
+            str(row.get("embedding_provider") or "") != expected_provider
+            or str(row.get("embedding_model") or "") != expected_model
+            or int(row.get("embedding_dimensions") or 0) != expected_dimensions
+        ):
+            return 0, 0, set()
+        record_id = str(row.get("record_id") or row.get("entry_id") or "")
+        if record_id and (requested is None or record_id in requested):
+            done_ids.add(record_id)
     # Rows outside the requested set (or duplicates) mean the vector file
     # cannot be aligned with done_ids: offsets shift and the dimension
     # inferred below would be wrong.
@@ -830,8 +970,68 @@ async def semantic_entry_rows(
             "folder_id": entry.folder_id,
             "semantic_score": hit.score,
             "semantic_rank": hit.rank,
+            "matched_section_id": hit.section_id,
+            "evidence_level": "section" if hit.section_id else "document",
+            "match_origin": "semantic",
+            "evidence_score": hit.score,
         })
     return out
+
+
+async def best_semantic_sections(
+    query: str,
+    entry_ids: Iterable[str],
+    *,
+    index_name: str = DEFAULT_INDEX_NAME,
+    client: EmbeddingClient | None = None,
+) -> dict[str, tuple[str, float]]:
+    """Return the best indexed stable section for each scoped entry.
+
+    This fills section locators for lexical candidates without broadening the
+    candidate set. Only section vectors belonging to ``entry_ids`` are scored.
+    """
+    clean_query = str(query or "").strip()
+    scoped_ids = {str(entry_id) for entry_id in entry_ids if str(entry_id)}
+    if not clean_query or not scoped_ids or not _semantic_index_exists(index_name):
+        return {}
+    settings = get_settings()
+    manifest = _read_manifest(semantic_index_dir(index_name) / "manifest.json")
+    if not manifest or not _manifest_matches_settings(manifest, settings):
+        return {}
+    if client is None and not settings.embedding_api_key:
+        return {}
+    client = client or get_embedding_client(settings)
+    vectors = await _embed_queries_cached(
+        client,
+        [clean_query],
+        index_name=index_name,
+        batch_size=max(1, int(settings.embedding_batch_size or 10)),
+    )
+    query_vector = vectors[0] if vectors else []
+    loaded = _load_semantic_index(index_name)
+    if loaded is None or len(query_vector) != loaded.dimensions:
+        return {}
+
+    q = array("f", query_vector)
+    sumprod = getattr(math, "sumprod", None)
+    matches: dict[str, tuple[str, float]] = {}
+    available = min(loaded.entries_count, len(loaded.vectors) // loaded.dimensions)
+    for index, row in enumerate(loaded.metadata[:available]):
+        entry_id = str(row.get("entry_id") or "")
+        section_id = str(row.get("section_id") or "")
+        if entry_id not in scoped_ids or not section_id:
+            continue
+        start = index * loaded.dimensions
+        vector = loaded.vectors[start:start + loaded.dimensions]
+        score = (
+            sumprod(q, vector)
+            if sumprod is not None
+            else sum(qi * vi for qi, vi in zip(q, vector))
+        )
+        previous = matches.get(entry_id)
+        if previous is None or float(score) > previous[1]:
+            matches[entry_id] = (section_id, float(score))
+    return matches
 
 
 async def _embed_queries_cached(
@@ -1120,13 +1320,19 @@ def _write_sqlite_vec_index(
         conn.execute("""
             CREATE TABLE semantic_entries (
                 rowid INTEGER PRIMARY KEY,
-                entry_id TEXT NOT NULL UNIQUE,
+                record_id TEXT NOT NULL UNIQUE,
+                entry_id TEXT NOT NULL,
                 file_id TEXT,
+                section_id TEXT,
                 display_name TEXT,
                 text_hash TEXT,
                 updated_at TEXT
             )
         """)
+        conn.execute(
+            "CREATE INDEX semantic_entries_entry_id_idx "
+            "ON semantic_entries(entry_id)"
+        )
         conn.execute("""
             CREATE TABLE semantic_index_meta (
                 key TEXT PRIMARY KEY,
@@ -1148,14 +1354,16 @@ def _write_sqlite_vec_index(
                 ("source_manifest", manifest_path.read_text(encoding="utf-8")),
             ],
         )
-        entry_rows: list[tuple[int, str, str, str, str, str]] = []
+        entry_rows: list[tuple[int, str, str, str, str, str, str, str]] = []
         vector_rows: list[tuple[int, sqlite3.Binary]] = []
         for idx, row in enumerate(metadata[:available]):
             rowid = idx + 1
             entry_rows.append((
                 rowid,
+                str(row.get("record_id") or row.get("entry_id") or ""),
                 str(row.get("entry_id") or ""),
                 str(row.get("file_id") or ""),
+                str(row.get("section_id") or ""),
                 str(row.get("display_name") or ""),
                 str(row.get("text_hash") or ""),
                 str(row.get("updated_at") or ""),
@@ -1168,9 +1376,10 @@ def _write_sqlite_vec_index(
         conn.executemany(
             """
             INSERT INTO semantic_entries(
-                rowid, entry_id, file_id, display_name, text_hash, updated_at
+                rowid, record_id, entry_id, file_id, section_id,
+                display_name, text_hash, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             entry_rows,
         )
@@ -1203,29 +1412,46 @@ def _search_sqlite_vec_index(
     conn = _connect_sqlite_vec(_sqlite_vec_index_path(index_name))
     try:
         out: list[list[SemanticHit]] = []
+        total_vectors = max(0, int(manifest.get("entries") or 0))
         for qvec in query_vectors:
             if len(qvec) != dimensions:
                 out.append([])
                 continue
             blob = sqlite3.Binary(struct.pack(f"<{dimensions}f", *qvec))
-            rows = conn.execute(
-                """
-                SELECT semantic_entries.entry_id, vec_entries.distance
-                FROM vec_entries
-                JOIN semantic_entries ON semantic_entries.rowid = vec_entries.rowid
-                WHERE embedding MATCH ? AND k = ?
-                ORDER BY vec_entries.distance
-                """,
-                (blob, limit),
-            ).fetchall()
-            hits = [
-                SemanticHit(
-                    entry_id=str(entry_id),
-                    score=1.0 / (1.0 + float(distance or 0.0)),
-                    rank=rank,
-                )
-                for rank, (entry_id, distance) in enumerate(rows, start=1)
-            ]
+            candidate_count = min(total_vectors, max(limit, limit * 4))
+            hits: list[SemanticHit] = []
+            while candidate_count > 0:
+                rows = conn.execute(
+                    """
+                    SELECT semantic_entries.entry_id,
+                           semantic_entries.section_id,
+                           vec_entries.distance
+                    FROM vec_entries
+                    JOIN semantic_entries
+                      ON semantic_entries.rowid = vec_entries.rowid
+                    WHERE embedding MATCH ? AND k = ?
+                    ORDER BY vec_entries.distance
+                    """,
+                    (blob, candidate_count),
+                ).fetchall()
+                hits = []
+                seen_entry_ids: set[str] = set()
+                for entry_id, section_id, distance in rows:
+                    clean_entry_id = str(entry_id or "")
+                    if not clean_entry_id or clean_entry_id in seen_entry_ids:
+                        continue
+                    seen_entry_ids.add(clean_entry_id)
+                    hits.append(SemanticHit(
+                        entry_id=clean_entry_id,
+                        score=1.0 / (1.0 + float(distance or 0.0)),
+                        rank=len(hits) + 1,
+                        section_id=str(section_id) if section_id else None,
+                    ))
+                    if len(hits) >= limit:
+                        break
+                if len(hits) >= limit or candidate_count >= total_vectors:
+                    break
+                candidate_count = min(total_vectors, candidate_count * 2)
             out.append(hits)
         return out
     finally:
@@ -1281,12 +1507,26 @@ def _semantic_hits_from_scores(
     *,
     limit: int,
 ) -> list[SemanticHit]:
-    top = sorted(scores, key=lambda item: item[1], reverse=True)[:limit]
-    return [
-        SemanticHit(entry_id=str(metadata[idx]["entry_id"]), score=score, rank=rank)
-        for rank, (idx, score) in enumerate(top, start=1)
-        if idx < len(metadata)
-    ]
+    hits: list[SemanticHit] = []
+    seen_entry_ids: set[str] = set()
+    for idx, score in sorted(scores, key=lambda item: item[1], reverse=True):
+        if idx >= len(metadata):
+            continue
+        row = metadata[idx]
+        entry_id = str(row.get("entry_id") or "")
+        if not entry_id or entry_id in seen_entry_ids:
+            continue
+        seen_entry_ids.add(entry_id)
+        section_id = row.get("section_id")
+        hits.append(SemanticHit(
+            entry_id=entry_id,
+            score=score,
+            rank=len(hits) + 1,
+            section_id=str(section_id) if section_id else None,
+        ))
+        if len(hits) >= limit:
+            break
+    return hits
 
 
 async def _load_indexable_entries(
@@ -1322,6 +1562,170 @@ async def _load_indexable_entries(
     return [(entry, file_row) for entry, file_row in rows]
 
 
+async def _iter_semantic_input_pages(
+    session: AsyncSession,
+    *,
+    explicit_records: list[_SemanticInput] | None,
+    page_size: int,
+) -> AsyncIterator[list[_SemanticInput]]:
+    """Yield bounded semantic-input pages for a full rebuild."""
+    if explicit_records is not None:
+        for start in range(0, len(explicit_records), page_size):
+            yield explicit_records[start:start + page_size]
+        return
+
+    after_id: str | None = None
+    while True:
+        conditions = [
+            FileEntry.deleted_at.is_(None),
+            File.deleted_at.is_(None),
+            FileEntry.lifecycle.in_(entries_repo.ACTIVE_LIFECYCLES),
+            File.ingest_status == "done",
+        ]
+        if after_id is not None:
+            conditions.append(FileEntry.id > after_id)
+        stmt = (
+            select(FileEntry, File)
+            .join(File, File.id == FileEntry.file_id)
+            .where(*conditions)
+            .order_by(FileEntry.id.asc())
+            .limit(page_size)
+        )
+        rows = (await session.execute(stmt)).all()
+        if not rows:
+            break
+        pairs = [(entry, file_row) for entry, file_row in rows]
+        yield _semantic_inputs(pairs)
+        after_id = str(rows[-1][0].id)
+        if len(rows) < page_size:
+            break
+
+
+def _semantic_inputs(
+    pairs: list[tuple[FileEntry, File]],
+) -> list[_SemanticInput]:
+    records: list[_SemanticInput] = []
+    for entry, file_row in pairs:
+        full_text = _entry_text(entry, file_row)
+        if full_text:
+            records.append(_SemanticInput(
+                entry=entry,
+                file_row=file_row,
+                record_id=_semantic_record_id(entry.id, None),
+                section_id=None,
+                text=full_text,
+            ))
+        for section_id, text in _section_embedding_inputs(
+            file_row.description,
+            summary=file_row.summary,
+        ):
+            records.append(_SemanticInput(
+                entry=entry,
+                file_row=file_row,
+                record_id=_semantic_record_id(entry.id, section_id),
+                section_id=section_id,
+                text=text,
+            ))
+    return records
+
+
+def _semantic_record_id(entry_id: str, section_id: str | None) -> str:
+    if section_id is None:
+        return entry_id
+    return f"{entry_id}#section:{section_id}"
+
+
+def _section_embedding_inputs(
+    description: Any,
+    *,
+    summary: str | None,
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for section in _stable_sections(description):
+        section_id = str(section.get("id") or "").strip()
+        if not section_id or section_id in seen or not _is_stable_section(section):
+            continue
+        text = semantic_section_text(
+            description,
+            summary=summary,
+            section_id=section_id,
+            max_chars=EMBEDDING_TEXT_MAX_CHARS,
+        )
+        if text:
+            out.append((section_id, text))
+            seen.add(section_id)
+        if len(out) >= SECTION_EMBEDDING_MAX_SECTIONS:
+            break
+    return out
+
+
+def semantic_section_text(
+    description: Any,
+    *,
+    summary: str | None,
+    section_id: str,
+    max_chars: int | None = None,
+) -> str:
+    """Return the stable evidence text used for a section vector."""
+    for section in _stable_sections(description):
+        if str(section.get("id") or "").strip() != section_id:
+            continue
+        if not _is_stable_section(section):
+            return ""
+        line = _section_evidence_line(section)
+        if not line:
+            return ""
+        text = "\n\n".join(
+            part
+            for part in (
+                f"summary: {summary}" if summary else "",
+                f"section: {line}",
+            )
+            if part
+        ).strip()
+        if max_chars is not None and max_chars > 0:
+            return text[:max_chars]
+        return text
+    return ""
+
+
+def _stable_sections(description: Any) -> list[dict[str, Any]]:
+    if not isinstance(description, dict):
+        return []
+    sections = description.get("sections")
+    if not isinstance(sections, list):
+        return []
+    return [section for section in sections if isinstance(section, dict)]
+
+
+def _section_evidence_line(section: dict[str, Any]) -> str:
+    title = _stringify(section.get("title")).strip()
+    summary = _stringify(section.get("summary")).strip()
+    terms = _stringify(section.get("key_terms")).strip()
+    anchor = section.get("anchor")
+    anchor_text = ""
+    if isinstance(anchor, dict):
+        anchor_text = " ".join(
+            part
+            for part in (
+                _stringify(anchor.get("unit")).strip(),
+                _stringify(anchor.get("value") or anchor.get("path")).strip(),
+            )
+            if part
+        )
+    return " | ".join(
+        part for part in (title, summary, terms, anchor_text) if part
+    )
+
+
+def _is_stable_section(section: dict[str, Any]) -> bool:
+    title = _stringify(section.get("title")).strip()
+    if title and _is_generic_section_title(title):
+        return False
+    return bool(str(section.get("id") or "").strip() and _section_evidence_line(section))
+
+
 def _entry_text(entry: FileEntry, file_row: File) -> str:
     parts = [
         f"name: {entry.display_name or ''}",
@@ -1351,6 +1755,13 @@ def _description_text(description: Any) -> str:
             title = section.get("title")
             summary = section.get("summary")
             key_terms = section.get("key_terms")
+            if (
+                isinstance(title, str)
+                and _is_generic_section_title(title)
+                and not summary
+                and not key_terms
+            ):
+                continue
             line = " ".join(
                 str(item)
                 for item in (title, summary, _stringify(key_terms))
@@ -1359,6 +1770,22 @@ def _description_text(description: Any) -> str:
             if line:
                 parts.append(f"section: {line}")
     return "\n".join(parts)
+
+
+def _is_generic_section_title(title: str) -> bool:
+    lower = " ".join(title.strip().lower().split())
+    if lower in {"document", "full document", "entire document"}:
+        return True
+    if lower.startswith("lines "):
+        left, separator, right = lower.removeprefix("lines ").partition("-")
+        return bool(separator and left.isdigit() and right.isdigit())
+    if lower.startswith("page "):
+        return lower.removeprefix("page ").isdigit()
+    if lower.startswith("section "):
+        return lower.removeprefix("section ").isdigit()
+    if lower.startswith("ocr page "):
+        return lower.removeprefix("ocr page ").isdigit()
+    return False
 
 
 def _stringify(value: Any) -> str:

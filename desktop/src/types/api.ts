@@ -184,8 +184,18 @@ export interface ReplayedTurn {
   attachments?: Array<{ name: string; media_type: string }>;
   metrics: {
     tokens_in: number;
+    prompt_tokens: number;
     tokens_out: number;
     cache_read: number;
+    cache_creation: number;
+    cache_eligible_prompt_tokens: number;
+    cache_eligible_read_tokens: number;
+    cache_eligible_estimated_tokens: number;
+    cache_eligible_requests: number;
+    cache_eligible_hit_ratio: number | null;
+    cache_eligible_reuse_ratio: number | null;
+    prompt_prefix_breaks: number;
+    cache_slo: CacheSlo;
     tool_calls: number;
     llm_calls: number;
     duration_ms: number;
@@ -198,6 +208,7 @@ export interface SessionTranscript {
   ended_at: string | null;
   end_reason: string | null;
   mode: ChatMode;
+  metrics: ReplayedTurn["metrics"];
   turns: ReplayedTurn[];
 }
 
@@ -209,9 +220,26 @@ export interface SessionTotals {
     turn_count: number;
     input_tokens: number;
     output_tokens: number;
+    prompt_tokens: number;
+    cache_read: number;
+    cache_creation: number;
+    cache_eligible_prompt_tokens: number;
+    cache_eligible_read_tokens: number;
+    cache_eligible_estimated_tokens: number;
+    cache_eligible_requests: number;
+    cache_eligible_hit_ratio: number | null;
+    cache_eligible_reuse_ratio: number | null;
+    prompt_prefix_breaks: number;
+    cache_slo: CacheSlo;
     tool_calls: number;
     llm_calls: number;
   };
+}
+
+export interface CacheSlo {
+  status: "met" | "breached" | "insufficient_data";
+  minimum_hit_ratio: number;
+  minimum_eligible_requests: number;
 }
 
 export interface RunningCount {
@@ -246,8 +274,10 @@ export interface RecentTask {
   last_error: string | null;
   duration_ms: number | null;
   tokens_in: number | null;
+  prompt_tokens: number | null;
   tokens_out: number | null;
   cache_read: number | null;
+  cache_creation: number | null;
   llm_calls: number | null;
 }
 
@@ -361,14 +391,19 @@ export interface ServerSettings {
   app_env: string;
   marginalia_home: string;
   db_backend: string;
+  postgres_pool_size: number;
+  postgres_max_overflow: number;
+  postgres_pool_timeout_seconds: number;
   storage_backend: string;
   worker_enabled: boolean;
   worker_batch_size: number;
+  bulk_reprocess_page_size: number;
   auto_lifecycle_enabled: boolean;
   default_on_conflict: string;
   agent_plan_max_tokens: number;
   agent_execute_max_tokens: number;
   agent_execute_max_turns: number;
+  agent_max_parallel_tool_calls: number;
   agent_final_answer_continue_turns: number;
   agent_final_answer_max_chars: number;
   agent_turn_timeout_seconds: number;
@@ -377,12 +412,14 @@ export interface ServerSettings {
   compression_target_chars: number;
   compression_context_chars: number;
   compression_max_ratio: number;
+  llm_ingest_max_tokens: number;
   llm_ingest_concurrency: number;
   llm_default_tps: number;
   llm_chat_tps: number;
   llm_reflect_tps: number;
   llm_ingest_tps: number;
   llm_vision_tps: number;
+  llm_vision_supports_vision: boolean;
   embedding_provider: "dashscope" | "openai-compatible";
   embedding_api_key_set: boolean;
   embedding_base_url: string;
@@ -570,6 +607,7 @@ export interface SemanticIndexStatus {
   configured_provider: string;
   configured_model: string;
   configured_dimensions: number;
+  rebuild_page_size: number;
   compatible: boolean;
   needs_rebuild: boolean;
 }
@@ -590,6 +628,17 @@ export interface LlmProfileResolved {
   base_url: string | null;
   model: string | null;
   tps: number;
+  capabilities: LlmModelCapabilities;
+}
+
+export interface LlmModelCapabilities {
+  dialect: string;
+  context_window: number;
+  tokenizer: string;
+  supports_vision: boolean;
+  supports_tools: boolean;
+  supports_temperature: boolean;
+  token_limit_param: "max_tokens" | "max_completion_tokens";
 }
 
 export interface LlmSettings {
@@ -602,6 +651,7 @@ export interface LlmSettings {
     api_key: string | null;
     api_key_set: boolean;
     tps: number;
+    capabilities: LlmModelCapabilities;
   };
 }
 

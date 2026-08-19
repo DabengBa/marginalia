@@ -37,9 +37,11 @@ from marginalia.pipelines.document_vision import (
     inline_document_image_vision_text,
     persisted_document_image_payload,
     persisted_document_image_segment,
+    prefer_source_text_for_question,
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -66,24 +68,25 @@ class DocxPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body_bytes = await self._read_bytes(storage, ctx.storage_key)
-        # python-docx parsing is pure-CPU; offload it so the event loop and
-        # worker heartbeats stay responsive on large documents.
-        paragraphs = await asyncio.to_thread(
-            self._parse_paragraphs_from_bytes, body_bytes,
-        )
-        images = await asyncio.to_thread(_extract_docx_images, body_bytes)
-        vision_payload = await describe_document_images(
-            settings=get_settings(),
-            images=images,
-            document_name=ctx.display_name or ctx.storage_key,
-            document_kind="docx",
-        )
-        paragraphs = inline_document_image_vision_text(
-            paragraphs,
-            vision_payload,
-            anchor_key="block",
-        )
+        with measure_stage("extraction"):
+            body_bytes = await self._read_bytes(storage, ctx.storage_key)
+            # Keep CPU-heavy package parsing off the event loop.
+            paragraphs = await asyncio.to_thread(
+                self._parse_paragraphs_from_bytes, body_bytes,
+            )
+        with measure_stage("vision"):
+            images = await asyncio.to_thread(_extract_docx_images, body_bytes)
+            vision_payload = await describe_document_images(
+                settings=get_settings(),
+                images=images,
+                document_name=ctx.display_name or ctx.storage_key,
+                document_kind="docx",
+            )
+            paragraphs = inline_document_image_vision_text(
+                paragraphs,
+                vision_payload,
+                anchor_key="block",
+            )
         full_body = "\n".join(paragraphs)
         indexed_chars = min(len(full_body), MAX_OUTPUT_CHARS)
         body = full_body
@@ -97,8 +100,15 @@ class DocxPipeline(Pipeline):
         vision_coverage = document_vision_coverage(vision_payload)
         if vision_coverage is not None:
             coverage["document_vision"] = vision_coverage
+        fallback_sections = _docx_sections(paragraphs, indexed_chars=indexed_chars)
         result = await index_extracted_text(
-            body, ctx, kind="text", coverage=coverage,
+            body,
+            ctx,
+            kind="text",
+            coverage=coverage,
+            fallback_sections=fallback_sections,
+            pipeline=self.name,
+            metadata={**coverage, "sections": fallback_sections},
         )
         result.description = attach_document_vision_description(
             result.description,
@@ -117,25 +127,49 @@ class DocxPipeline(Pipeline):
         if question:
             settings = get_settings()
             body = await self._read_bytes(storage, file_row.storage_key)
-            images = await asyncio.to_thread(_extract_docx_images, body)
-            segment = await answer_document_image_question(
-                settings=settings,
-                images=images,
-                args=args,
-                document_name=str(getattr(file_row, "storage_key", "") or ""),
-                document_kind="docx",
-                mode="docx_image_question",
+            source = await self._source_segment_from_body(
+                body,
+                args,
+                file_row=file_row,
             )
-            if segment.error is None:
+            source_answer = prefer_source_text_for_question(
+                source,
+                mode="docx_text_question",
+                question=question,
+                answered_by="docx_extracted_text",
+            )
+            if source_answer is not None:
+                return source_answer
+            try:
+                images = await asyncio.to_thread(_extract_docx_images, body)
+                segment = await answer_document_image_question(
+                    settings=settings,
+                    images=images,
+                    args=args,
+                    document_name=str(getattr(file_row, "storage_key", "") or ""),
+                    document_kind="docx",
+                    mode="docx_image_question",
+                )
+            except Exception as exc:  # noqa: BLE001
+                segment = SegmentResult(
+                    error=f"DOCX vision read failed: {exc}",
+                    extras={"mode": "docx_image_question", "question": question},
+                )
+            if segment.error is None and segment.text.strip():
                 return segment
             fallback = persisted_document_image_segment(
                 file_row,
                 args,
                 mode="docx_image_question",
-                warning=segment.error,
+                warning=segment.error or "vision model returned no DOCX image answer",
             )
             if fallback.error is None:
                 return fallback
+            if segment.error is None:
+                return SegmentResult(
+                    error="vision model returned no DOCX image answer",
+                    extras=dict(segment.extras or {}),
+                )
             return segment
 
         paragraphs = await self._extract_paragraphs(storage, file_row.storage_key)
@@ -166,21 +200,56 @@ class DocxPipeline(Pipeline):
         """Bytes-first variant — used by ArchivePipeline for member peeks."""
         question = str(args.get("question") or "").strip()
         if question:
-            settings = get_settings()
-            images = await asyncio.to_thread(_extract_docx_images, body)
-            return await answer_document_image_question(
-                settings=settings,
-                images=images,
-                args=args,
-                document_name=filename or "archive member",
-                document_kind="docx",
-                mode="docx_image_question",
+            source = await self._source_segment_from_body(
+                body,
+                args,
+                file_row=None,
             )
+            source_answer = prefer_source_text_for_question(
+                source,
+                mode="docx_text_question",
+                question=question,
+                answered_by="docx_extracted_text",
+            )
+            if source_answer is not None:
+                return source_answer
+            settings = get_settings()
+            try:
+                images = await asyncio.to_thread(_extract_docx_images, body)
+                segment = await answer_document_image_question(
+                    settings=settings,
+                    images=images,
+                    args=args,
+                    document_name=filename or "archive member",
+                    document_kind="docx",
+                    mode="docx_image_question",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return SegmentResult(error=f"DOCX vision read failed: {exc}")
+            if segment.error is None and not segment.text.strip():
+                return SegmentResult(
+                    error="vision model returned no DOCX image answer",
+                    extras=dict(segment.extras or {}),
+                )
+            return segment
         try:
             paragraphs = self._parse_paragraphs_from_bytes(body)
         except Exception as exc:  # noqa: BLE001 — python-docx surfaces many
             return SegmentResult(error=f"docx parse failed: {exc}")
         return self._slice(paragraphs, args, file_row=None)
+
+    async def _source_segment_from_body(
+        self,
+        body: bytes,
+        args: dict[str, Any],
+        *,
+        file_row: Any | None,
+    ) -> SegmentResult:
+        try:
+            paragraphs = await asyncio.to_thread(self._parse_paragraphs_from_bytes, body)
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"docx parse failed: {exc}")
+        return self._slice(paragraphs, args, file_row=file_row)
 
     def _slice(
         self,
@@ -449,6 +518,55 @@ def _docx_coverage(
         "chunk_count": 1,
         "text_truncated": indexed_partial,
     }
+
+
+def _docx_sections(
+    blocks: list[str],
+    *,
+    indexed_chars: int,
+) -> list[dict[str, Any]]:
+    """Infer stable heading/block ranges without depending on model output."""
+    indexed: list[tuple[int, str]] = []
+    consumed = 0
+    for block_no, block in enumerate(blocks, start=1):
+        if consumed >= indexed_chars:
+            break
+        indexed.append((block_no, block))
+        consumed += len(block) + 1
+    if not indexed:
+        return []
+
+    starts: list[tuple[int, str]] = []
+    for block_no, block in indexed:
+        first_line = (block.splitlines() or [""])[0].strip()
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", first_line)
+        if match:
+            starts.append((block_no, match.group(1).strip()))
+    if not starts:
+        starts = [(indexed[0][0], "Document")]
+
+    last_block = indexed[-1][0]
+    sections: list[dict[str, Any]] = []
+    for offset, (start_block, title) in enumerate(starts[:200], start=1):
+        next_block = starts[offset][0] if offset < len(starts) else last_block + 1
+        end_block = max(start_block, next_block - 1)
+        section_text = " ".join(
+            block
+            for block_no, block in indexed
+            if start_block <= block_no <= end_block
+        )
+        section_text = re.sub(r"^#{1,6}\s+", "", section_text).strip()
+        sections.append({
+            "id": f"s{offset}",
+            "title": title,
+            "anchor": {
+                "unit": "blocks",
+                "value": f"{start_block}-{end_block}",
+            },
+            "summary": " ".join(section_text.split())[:300],
+            "key_terms": [title] if title != "Document" else [],
+        })
+    return sections
 
 
 # ---- read_segment helpers --------------------------------------------------

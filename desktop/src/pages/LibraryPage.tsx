@@ -23,7 +23,7 @@ import { Inbox } from "lucide-react";
 import { fileEntries, tasks, webdavSync } from "@/api/client";
 import type { ActiveTasks, FileEntrySummary, FileMetadata, Folder, WebDavStatus } from "@/types/api";
 import { FolderTree } from "@/components/library/FolderTree";
-import { FileViewer } from "@/components/library/FileViewer";
+import { FileViewer, type ViewerLocator } from "@/components/library/FileViewer";
 import { MetaPanel } from "@/components/library/MetaPanel";
 import { NewFolderDialog, UploadDialog, WebDavSyncDialog } from "@/components/library/Dialogs";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
@@ -52,11 +52,9 @@ export function LibraryPage() {
   // loads the leaf folder's contents).
   const [pendingEntryId, setPendingEntryId] = useState<string | null>(null);
   // Optional position locator that travelled in on the same ?entry=
-  // deep-link (`?q=<text>`, `?line=10-40`, or `?page=3`). FileViewer
-  // reads this and scrolls/jumps/highlights once the file renders.
-  const [pendingLocator, setPendingLocator] = useState<
-    { kind: "quote" | "line" | "page"; value: string } | null
-  >(null);
+  // deep-link. Office citations may carry several fields together; FileViewer
+  // consumes the complete locator once navigation and highlighting finish.
+  const [pendingLocator, setPendingLocator] = useState<ViewerLocator | null>(null);
   const { t } = useI18n();
 
   const [newFolderUnder, setNewFolderUnder] = useState<{ id: string | null; name: string } | null>(null);
@@ -111,40 +109,41 @@ export function LibraryPage() {
   // chain, hand the ids to FolderTree as expandPath so each parent
   // opens, and remember the entry id so the tree can complete the
   // selection once the leaf folder's contents come back.
-  // ?q=, ?line=, ?page= ride along on the same URL — captured into
+  // Locator fields ride along on the same URL — captured into
   // pendingLocator and consumed by FileViewer once the file loads.
   useEffect(() => {
     const entryId = searchParams.get("entry");
     if (!entryId) return;
-    const quoteParam = searchParams.get("q");
-    const lineParam = searchParams.get("line");
-    const pageParam = searchParams.get("page");
+    const locator: ViewerLocator = {
+      quote: searchParams.get("q") || undefined,
+      line: searchParams.get("line") || undefined,
+      page: searchParams.get("page") || undefined,
+      block: searchParams.get("block") || undefined,
+      sheet: searchParams.get("sheet") || undefined,
+      cell: searchParams.get("cell") || undefined,
+      row: searchParams.get("row") || undefined,
+    };
+    const hasLocator = Object.values(locator).some(Boolean);
+    const locatorParams = ["q", "line", "page", "block", "sheet", "cell", "row"];
     let cancelled = false;
     fileEntries.path(entryId).then(
       (p) => {
         if (cancelled) return;
         setExpandPath(p.ancestors.map((a) => a.id));
         setPendingEntryId(p.entry_id);
-        if (quoteParam) setPendingLocator({ kind: "quote", value: quoteParam });
-        else if (lineParam) setPendingLocator({ kind: "line", value: lineParam });
-        else if (pageParam) setPendingLocator({ kind: "page", value: pageParam });
-        else setPendingLocator(null);
+        setPendingLocator(hasLocator ? locator : null);
         // Drop the query params so a later navigation back to /library
         // (without them) doesn't keep retriggering the expansion.
         const next = new URLSearchParams(searchParams);
         next.delete("entry");
-        next.delete("q");
-        next.delete("line");
-        next.delete("page");
+        locatorParams.forEach((param) => next.delete(param));
         setSearchParams(next, { replace: true });
       },
       () => {
         if (!cancelled) {
           const next = new URLSearchParams(searchParams);
           next.delete("entry");
-          next.delete("q");
-          next.delete("line");
-          next.delete("page");
+          locatorParams.forEach((param) => next.delete(param));
           setSearchParams(next, { replace: true });
         }
       },

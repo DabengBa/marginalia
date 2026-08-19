@@ -332,12 +332,14 @@ async def main() -> None:
                     "/v1/files/reprocess",
                     json={"file_ids": [file_id, file_id2]},
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 202, r.text
                 rb = r.json()
                 assert rb["file_count"] == 2, f"file_count: {rb}"
-                assert len(rb["task_ids"]) == 2, f"task_ids: {rb}"
+                assert len(rb["task_ids"]) == 1, f"task_ids: {rb}"
                 assert rb["skipped_count"] == 0, f"skipped_count: {rb}"
-                for tid in rb["task_ids"]:
+                assert await _wait_for_task_done(rb["dispatcher_task_id"]) == "done"
+                for fid in (file_id, file_id2):
+                    tid = await _latest_ingest_task_id(fid)
                     assert await _wait_for_task_done(tid) == "done"
 
                 async with factory() as s:
@@ -365,12 +367,14 @@ async def main() -> None:
 
                 _FAKE.responses.append(_payload("REDONE again", "zeta"))
                 r = await c.post("/v1/files/reprocess", json={"all": True})
-                assert r.status_code == 200, r.text
+                assert r.status_code == 202, r.text
                 rb = r.json()
                 # Only the live file (file_id) should be in the count.
                 assert rb["file_count"] == 1, f"expected 1 live, got {rb}"
-                for tid in rb["task_ids"]:
-                    assert await _wait_for_task_done(tid) == "done"
+                assert await _wait_for_task_done(rb["dispatcher_task_id"]) == "done"
+                assert await _wait_for_task_done(
+                    await _latest_ingest_task_id(file_id)
+                ) == "done"
                 print("[6] bulk all=true: deleted files excluded")
 
                 # ---- status filter: folder subtree + failed only ----
@@ -395,12 +399,15 @@ async def main() -> None:
                     "/v1/files/reprocess",
                     json={"folder_id": folder_id, "status": "failed"},
                 )
-                assert r.status_code == 200, r.text
+                assert r.status_code == 202, r.text
                 rb = r.json()
                 assert rb["file_count"] == 1, f"expected only failed file, got {rb}"
                 assert rb["status_filter"] == "failed"
                 assert len(rb["task_ids"]) == 1, f"task_ids: {rb}"
-                assert await _wait_for_task_done(rb["task_ids"][0]) == "done"
+                assert await _wait_for_task_done(rb["dispatcher_task_id"]) == "done"
+                assert await _wait_for_task_done(
+                    await _latest_ingest_task_id(file_id)
+                ) == "done"
                 async with factory() as s:
                     s1 = (await s.get(File, file_id)).summary
                     s3 = (await s.get(File, file_id3)).summary

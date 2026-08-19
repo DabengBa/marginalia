@@ -57,16 +57,24 @@ export function ActivityPopover({ open, pollMs }: Props) {
   const totals = recent.reduce(
     (acc, r) => {
       acc.tokens_in += r.tokens_in ?? 0;
+      acc.prompt_tokens += r.prompt_tokens ?? r.tokens_in ?? 0;
       acc.tokens_out += r.tokens_out ?? 0;
       acc.cache_read += r.cache_read ?? 0;
       acc.llm_calls += r.llm_calls ?? 0;
       acc.duration_ms += r.duration_ms ?? 0;
       return acc;
     },
-    { tokens_in: 0, tokens_out: 0, cache_read: 0, llm_calls: 0, duration_ms: 0 },
+    {
+      tokens_in: 0,
+      prompt_tokens: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      llm_calls: 0,
+      duration_ms: 0,
+    },
   );
-  const cachePct = totals.tokens_in > 0
-    ? Math.round((totals.cache_read / totals.tokens_in) * 100)
+  const cachePct = totals.prompt_tokens > 0
+    ? Math.round((totals.cache_read / totals.prompt_tokens) * 100)
     : 0;
   const recentSummary = t.activity.recentSummary(
     recent.length,
@@ -156,12 +164,13 @@ function RecentRow({ task }: { task: RecentTask }) {
   const { t } = useI18n();
   const ok = task.status === "done";
   const hasUsage = (task.tokens_in ?? 0) > 0 || (task.tokens_out ?? 0) > 0;
-  const cachePct = task.tokens_in
-    ? Math.round(((task.cache_read ?? 0) / task.tokens_in) * 100)
+  const promptTokens = task.prompt_tokens ?? task.tokens_in;
+  const cachePct = promptTokens
+    ? Math.round(((task.cache_read ?? 0) / promptTokens) * 100)
     : 0;
   const usageLine = [
     t.chat.tokens(fmtTokens(task.tokens_in ?? 0), fmtTokens(task.tokens_out ?? 0)),
-    task.tokens_in ? t.activity.cache(cachePct) : null,
+    promptTokens ? t.activity.cache(cachePct) : null,
     task.llm_calls ? t.activity.llm(task.llm_calls) : null,
   ].filter(Boolean).join(" · ");
   return (

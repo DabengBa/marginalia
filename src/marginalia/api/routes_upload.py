@@ -13,20 +13,24 @@ POST /upload?folder_id=<id>[&display_name=foo.pdf][&on_conflict=...]
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.config import get_settings
-from marginalia.db.session import get_session
+from marginalia.db.models import File as StoredFile
+from marginalia.db.session import get_session, session_scope
 from marginalia.services.folders import (
     AmbiguousRemotePathError,
     FolderNotFoundError,
 )
 from marginalia.services.upload import (
     DisplayNameConflictError,
+    UploadResult,
     upload as upload_service,
 )
 from marginalia.storage import get_storage
@@ -39,7 +43,7 @@ _DEFAULT_CHUNK = 1024 * 256
 # Content-Length covers the whole multipart envelope (boundaries + part
 # headers), so the up-front check gets a little slack; the streaming byte
 # counter below is the authoritative limit.
-_MULTIPART_OVERHEAD = 16 * 1024
+_MULTIPART_OVERHEAD = 256 * 1024
 
 
 class _UploadTooLargeError(Exception):
@@ -96,6 +100,78 @@ async def _stream_uploadfile(uf: UploadFile, cap: _ByteCap | None = None):
             cap.exceeded = True
             return
         yield chunk
+
+
+async def _best_effort_delete(storage: StorageBackend, storage_key: str) -> None:
+    try:
+        await storage.delete(storage_key)
+    except Exception:
+        log.exception("failed to delete unreferenced upload object %s", storage_key)
+
+
+async def _delete_upload_object_if_unreferenced(
+    storage: StorageBackend,
+    storage_key: str,
+) -> None:
+    """Compensate a failed commit without breaking an ambiguous success."""
+    try:
+        async with session_scope() as verification_session:
+            referenced = (
+                await verification_session.execute(
+                    select(StoredFile.id)
+                    .where(StoredFile.storage_key == storage_key)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+    except Exception:
+        # If the commit outcome cannot be established, an orphan is safer
+        # than a committed row whose bytes we destroy.
+        log.exception(
+            "could not verify ambiguous upload commit for %s; preserving object",
+            storage_key,
+        )
+        return
+    if referenced is not None:
+        log.warning(
+            "upload commit outcome was ambiguous but %s is referenced; "
+            "preserving object",
+            storage_key,
+        )
+        return
+    await _best_effort_delete(storage, storage_key)
+
+
+async def _commit_upload(
+    session: AsyncSession,
+    storage: StorageBackend,
+    result: UploadResult,
+) -> None:
+    try:
+        await session.commit()
+    except asyncio.CancelledError:
+        try:
+            await session.rollback()
+        except BaseException:
+            log.exception("failed to roll back cancelled upload transaction")
+        # Cancellation can interrupt commit after the database accepted it.
+        # Preserve a potentially live object for later reconciliation.
+        if result.storage_key:
+            log.warning(
+                "upload commit was cancelled; preserving %s for reconciliation",
+                result.storage_key,
+            )
+        raise
+    except BaseException:
+        try:
+            await session.rollback()
+        except Exception:
+            log.exception("failed to roll back ambiguous upload transaction")
+        if result.storage_key:
+            await _delete_upload_object_if_unreferenced(
+                storage,
+                result.storage_key,
+            )
+        raise
 
 
 @router.post("/upload", status_code=201)
@@ -205,7 +281,7 @@ async def upload_endpoint(
         await session.rollback()
         log.exception("upload failed unexpectedly destination=%s", destination)
         raise
-    await session.commit()
+    await _commit_upload(session, storage, result)
     log.info(
         "upload completed file_id=%s entry_id=%s folder_id=%s deduped=%s skipped=%s",
         result.file_id,

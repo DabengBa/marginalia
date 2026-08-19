@@ -41,8 +41,22 @@ export interface Step {
 
 export interface TurnMetrics {
   tokens_in?: number;
+  prompt_tokens?: number;
   tokens_out?: number;
   cache_read?: number;
+  cache_creation?: number;
+  cache_eligible_prompt_tokens?: number;
+  cache_eligible_read_tokens?: number;
+  cache_eligible_estimated_tokens?: number;
+  cache_eligible_requests?: number;
+  cache_eligible_hit_ratio?: number | null;
+  cache_eligible_reuse_ratio?: number | null;
+  prompt_prefix_breaks?: number;
+  cache_slo?: {
+    status: "met" | "breached" | "insufficient_data";
+    minimum_hit_ratio: number;
+    minimum_eligible_requests: number;
+  };
   tool_calls?: number;
   llm_calls?: number;
   duration_ms?: number;
@@ -105,14 +119,17 @@ export function TurnView({ turn }: { turn: Turn }) {
   // deep-link. Hand them to react-router so the tree expands to that
   // file in-app instead of the browser trying to open a custom-scheme
   // URL. When the citation carries a position locator (runtime.py
-  // rewrites footnote defs into ?q=<quote>, ?page=<n>, or — for legacy
-  // turns — ?line=<range> on the entry: URL), forward it as the
-  // matching /library query param so FileViewer can highlight or jump.
+  // rewrites footnote defs into one or more query fields), preserve all of
+  // them so Office links can navigate and highlight in one click.
   const onEntryLink = (id: string, locator?: EntryLocator) => {
     const q = new URLSearchParams({ entry: id });
-    if (locator?.kind === "quote") q.set("q", locator.value);
-    else if (locator?.kind === "line") q.set("line", locator.value);
-    else if (locator?.kind === "page") q.set("page", locator.value);
+    if (locator?.quote) q.set("q", locator.quote);
+    if (locator?.line) q.set("line", locator.line);
+    if (locator?.page) q.set("page", locator.page);
+    if (locator?.block) q.set("block", locator.block);
+    if (locator?.sheet) q.set("sheet", locator.sheet);
+    if (locator?.cell) q.set("cell", locator.cell);
+    if (locator?.row) q.set("row", locator.row);
     navigate(`/library?${q.toString()}`);
   };
 
@@ -360,10 +377,12 @@ function MetricsLine({ m }: { m: TurnMetrics }) {
   if (m.tokens_in != null || m.tokens_out != null) {
     parts.push(t.chat.tokens(fmtTokens(m.tokens_in ?? 0), fmtTokens(m.tokens_out ?? 0)));
   }
-  if (m.cache_read && m.tokens_in) {
-    const pct = Math.round((m.cache_read / m.tokens_in) * 100);
+  const promptTokens = m.prompt_tokens ?? m.tokens_in;
+  if (m.cache_read && promptTokens) {
+    const pct = Math.round((m.cache_read / promptTokens) * 100);
     parts.push(t.activity.cache(pct));
   }
+  if (m.cache_slo) parts.push(t.activity.cacheSlo(m.cache_slo.status));
   if (m.tool_calls != null) parts.push(t.chat.tools(m.tool_calls));
   if (parts.length === 0) return null;
   return (

@@ -36,9 +36,11 @@ from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, File, FileEntry, Folder
+from marginalia.db.models import Base, File, FileEntry, Folder, Task
 from marginalia.storage import get_storage
+from marginalia.tasks.handlers.delete_storage_object import handle_delete_storage_object
 from marginalia.tasks.handlers.purge_deleted_files import handle_purge_deleted_files
+from marginalia.tasks.kinds import KIND_DELETE_STORAGE_OBJECT
 from marginalia.utils.ids import new_id
 
 
@@ -168,7 +170,17 @@ async def main():
         f = await s.get(File, seeded["file_id"])
         assert ef is None
         assert f is None, "file should be gone now that no entries reference it"
+        delete_task = (
+            await s.execute(
+                select(Task).where(Task.kind == KIND_DELETE_STORAGE_OBJECT)
+            )
+        ).scalar_one()
     assert not await storage.exists(seeded["storage_key"]), "storage blob still present after file purge"
+    # The immediate best-effort delete preserves prompt local cleanup, while
+    # this durable intent makes a transient backend failure retryable.
+    assert delete_task.status == "pending"
+    await handle_delete_storage_object(delete_task.payload)
+    assert not await storage.exists(seeded["storage_key"])
     print("[3] entry_future purged; file row + storage object both gone")
 
     # --- 4. audit invariants ------------------------------------------------

@@ -111,10 +111,27 @@ StopReason = Literal["end_turn", "tool_use", "max_tokens", "stop_sequence", "oth
 
 @dataclass(slots=True)
 class TokenUsage:
+    """Disjoint input/cache counts plus the complete visible prompt size."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    prompt_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        self.input_tokens = max(0, int(self.input_tokens or 0))
+        self.output_tokens = max(0, int(self.output_tokens or 0))
+        self.cache_read_tokens = max(0, int(self.cache_read_tokens or 0))
+        self.cache_creation_tokens = max(0, int(self.cache_creation_tokens or 0))
+        if self.prompt_tokens is None:
+            self.prompt_tokens = (
+                self.input_tokens
+                + self.cache_read_tokens
+                + self.cache_creation_tokens
+            )
+        else:
+            self.prompt_tokens = max(0, int(self.prompt_tokens or 0))
 
 
 @dataclass(slots=True)

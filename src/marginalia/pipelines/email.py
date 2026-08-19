@@ -22,6 +22,7 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.pipelines.text import TextPipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 MAX_INDEX_CHARS = 120_000
 
@@ -49,10 +50,11 @@ class EmailPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body, coverage = await self._extract_text_with_coverage(
-            storage,
-            ctx.storage_key,
-        )
+        with measure_stage("extraction"):
+            body, coverage = await self._extract_text_with_coverage(
+                storage,
+                ctx.storage_key,
+            )
         return await index_extracted_text(
             body,
             ctx,

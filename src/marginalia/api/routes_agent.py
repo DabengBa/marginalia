@@ -21,10 +21,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent.cache_metrics import summarize_llm_calls
 from marginalia.agent.runtime import _public_plan_text, _rewrite_footnotes_for_display
 from marginalia.agent.runtime import _strip_session_name_line
 from marginalia.agent.runtime import TOOL_RESULT_PREVIEW_LEN
 from marginalia.agent import tool_display
+from marginalia.config import get_settings
 from marginalia.db.models import Session as SessionRow, TaskOutcome
 from marginalia.db.session import get_session
 from marginalia.repositories import audit_events as audit_events_repo
@@ -43,6 +45,50 @@ router = APIRouter(tags=["sessions"])
 
 class CreateSessionBody(BaseModel):
     initiating_user_message: str | None = None
+
+
+def _cache_metric_fields(llm_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = summarize_llm_calls(llm_calls)
+    settings = get_settings()
+    return {
+        "prompt_tokens": summary.prompt_tokens,
+        "cache_read": summary.cache_read_tokens,
+        "cache_creation": summary.cache_creation_tokens,
+        "cache_eligible_prompt_tokens": summary.eligible_prompt_tokens,
+        "cache_eligible_read_tokens": summary.eligible_read_tokens,
+        "cache_eligible_estimated_tokens": summary.eligible_estimated_tokens,
+        "cache_eligible_requests": summary.eligible_requests,
+        "cache_eligible_hit_ratio": summary.eligible_hit_ratio,
+        "cache_eligible_reuse_ratio": summary.eligible_reuse_ratio,
+        "prompt_prefix_breaks": summary.prefix_breaks,
+        "cache_slo": summary.slo_payload(
+            minimum_hit_ratio=settings.agent_cache_slo_min_hit_ratio,
+            minimum_eligible_requests=(
+                settings.agent_cache_slo_min_eligible_requests
+            ),
+        ),
+    }
+
+
+def _conversation_cache_metric_fields(conversations: list[Any]) -> dict[str, Any]:
+    calls = [
+        call
+        for conversation in conversations
+        for call in (conversation.llm_calls or [])
+        if isinstance(call, dict)
+    ]
+    return _cache_metric_fields(calls)
+
+
+def _session_totals_payload(session: Any, conversations: list[Any]) -> dict[str, Any]:
+    return {
+        "turn_count": session.turn_count,
+        "input_tokens": session.total_input_tokens,
+        "output_tokens": session.total_output_tokens,
+        "tool_calls": session.total_tool_calls,
+        "llm_calls": session.total_llm_calls,
+        **_conversation_cache_metric_fields(conversations),
+    }
 
 
 @router.post("/sessions", status_code=201)
@@ -68,23 +114,23 @@ async def close_session(
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if s.ended_at is not None:
-        return {"session_id": s.id, "ended_at": s.ended_at.isoformat(),
-                "end_reason": s.end_reason}
+        conversations = await session_service.list_for_session(db, session_id)
+        return {
+            "session_id": s.id,
+            "ended_at": s.ended_at.isoformat(),
+            "end_reason": s.end_reason,
+            "totals": _session_totals_payload(s, conversations),
+        }
     closed = await session_service.close_session(
         db, session_id=session_id, end_reason="normal"
     )
+    conversations = await session_service.list_for_session(db, session_id)
     await db.commit()
     return {
         "session_id": closed.id,
         "ended_at": closed.ended_at.isoformat() if closed.ended_at else None,
         "end_reason": closed.end_reason,
-        "totals": {
-            "turn_count": closed.turn_count,
-            "input_tokens": closed.total_input_tokens,
-            "output_tokens": closed.total_output_tokens,
-            "tool_calls": closed.total_tool_calls,
-            "llm_calls": closed.total_llm_calls,
-        },
+        "totals": _session_totals_payload(closed, conversations),
     }
 
 
@@ -335,6 +381,10 @@ async def session_messages(
         if "attached]" in (c.user_message or ""):
             attachments = list_turn_attachments(c.id)
 
+        cache_metrics = _cache_metric_fields([
+            call for call in (c.llm_calls or []) if isinstance(call, dict)
+        ])
+
         turns.append({
             "conversation_id": c.id,
             "turn_index": c.turn_index,
@@ -357,7 +407,7 @@ async def session_messages(
             "metrics": {
                 "tokens_in": c.total_input_tokens or 0,
                 "tokens_out": c.total_output_tokens or 0,
-                "cache_read": c.total_cache_read or 0,
+                **cache_metrics,
                 "tool_calls": c.total_tool_calls or 0,
                 "llm_calls": c.total_llm_calls or 0,
                 "duration_ms": c.total_duration_ms or 0,
@@ -370,5 +420,13 @@ async def session_messages(
         "ended_at": s.ended_at.isoformat() if s.ended_at else None,
         "end_reason": s.end_reason,
         "mode": session_mode,
+        "metrics": {
+            "tokens_in": sum(c.total_input_tokens or 0 for c in convs),
+            "tokens_out": sum(c.total_output_tokens or 0 for c in convs),
+            **_conversation_cache_metric_fields(convs),
+            "tool_calls": sum(c.total_tool_calls or 0 for c in convs),
+            "llm_calls": sum(c.total_llm_calls or 0 for c in convs),
+            "duration_ms": sum(c.total_duration_ms or 0 for c in convs),
+        },
         "turns": turns,
     }

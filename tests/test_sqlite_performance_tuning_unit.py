@@ -65,3 +65,32 @@ async def test_sqlite_engine_sets_performance_pragmas(tmp_path) -> None:
         assert int(temp_store) == 2
     finally:
         await engine.dispose()
+
+
+def test_postgres_engine_uses_configured_pool_limits(monkeypatch) -> None:
+    from marginalia.db import engine as engine_module
+
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_create_async_engine(url: str, **kwargs):  # noqa: ANN003
+        captured["url"] = url
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(engine_module, "create_async_engine", fake_create_async_engine)
+    settings = Settings(
+        db_backend="postgres",
+        postgres_dsn="postgresql+asyncpg://user:pass@db/example",
+        postgres_pool_size=12,
+        postgres_max_overflow=34,
+        postgres_pool_timeout_seconds=56,
+    )
+
+    result = engine_module._build_engine(settings)
+
+    assert result is sentinel
+    assert captured["pool_size"] == 12
+    assert captured["max_overflow"] == 34
+    assert captured["pool_timeout"] == 56
+    assert captured["pool_pre_ping"] is True

@@ -35,9 +35,11 @@ from marginalia.pipelines.document_vision import (
     inline_document_image_vision_text,
     persisted_document_image_payload,
     persisted_document_image_segment,
+    prefer_source_text_for_question,
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -64,32 +66,33 @@ class PptxPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body_bytes = await self._read_bytes(storage, ctx.storage_key)
-        # python-pptx deck parsing is pure-CPU; offload it so the event loop
-        # and worker heartbeats stay responsive on large presentations.
-        slides, coverage = await asyncio.to_thread(
-            self._render_from_bytes_with_coverage,
-            body_bytes,
-            max_slides=MAX_PPTX_SLIDES,
-        )
-        coverage["total_bytes"] = len(body_bytes)
-        coverage["indexed_bytes"] = len(body_bytes)
-        images = await asyncio.to_thread(
-            _extract_pptx_images,
-            body_bytes,
-            len(slides),
-        )
-        vision_payload = await describe_document_images(
-            settings=get_settings(),
-            images=images,
-            document_name=ctx.display_name or ctx.storage_key,
-            document_kind="pptx",
-        )
-        slides = inline_document_image_vision_text(
-            slides,
-            vision_payload,
-            anchor_key="slide",
-        )
+        with measure_stage("extraction"):
+            body_bytes = await self._read_bytes(storage, ctx.storage_key)
+            # Keep CPU-heavy package parsing off the event loop.
+            slides, coverage = await asyncio.to_thread(
+                self._render_from_bytes_with_coverage,
+                body_bytes,
+                max_slides=MAX_PPTX_SLIDES,
+            )
+            coverage["total_bytes"] = len(body_bytes)
+            coverage["indexed_bytes"] = len(body_bytes)
+        with measure_stage("vision"):
+            images = await asyncio.to_thread(
+                _extract_pptx_images,
+                body_bytes,
+                len(slides),
+            )
+            vision_payload = await describe_document_images(
+                settings=get_settings(),
+                images=images,
+                document_name=ctx.display_name or ctx.storage_key,
+                document_kind="pptx",
+            )
+            slides = inline_document_image_vision_text(
+                slides,
+                vision_payload,
+                anchor_key="slide",
+            )
         full_body = "\n\n".join(slides)
         indexed_chars = min(len(full_body), MAX_OUTPUT_CHARS)
         body = full_body
@@ -109,8 +112,15 @@ class PptxPipeline(Pipeline):
         vision_coverage = document_vision_coverage(vision_payload)
         if vision_coverage is not None:
             coverage["document_vision"] = vision_coverage
+        fallback_sections = _slide_sections(slides, indexed_chars=indexed_chars)
         result = await index_extracted_text(
-            body, ctx, kind="text", coverage=coverage,
+            body,
+            ctx,
+            kind="text",
+            coverage=coverage,
+            fallback_sections=fallback_sections,
+            pipeline=self.name,
+            metadata={**coverage, "sections": fallback_sections},
         )
         result.description = attach_document_vision_description(
             result.description,
@@ -129,25 +139,52 @@ class PptxPipeline(Pipeline):
         if question:
             settings = get_settings()
             body = await self._read_bytes(storage, file_row.storage_key)
-            images = await asyncio.to_thread(_extract_pptx_images, body)
-            segment = await answer_document_image_question(
-                settings=settings,
-                images=images,
-                args=args,
-                document_name=str(getattr(file_row, "storage_key", "") or ""),
-                document_kind="pptx",
-                mode="pptx_image_question",
+            source = await self._source_segment_from_body(
+                body,
+                args,
+                file_row=file_row,
+                include_persisted_vision=False,
             )
-            if segment.error is None:
+            source_answer = prefer_source_text_for_question(
+                source,
+                mode="pptx_text_question",
+                question=question,
+                answered_by="pptx_extracted_text",
+            )
+            if source_answer is not None and _has_meaningful_pptx_text(
+                source_answer.text
+            ):
+                return source_answer
+            try:
+                images = await asyncio.to_thread(_extract_pptx_images, body)
+                segment = await answer_document_image_question(
+                    settings=settings,
+                    images=images,
+                    args=args,
+                    document_name=str(getattr(file_row, "storage_key", "") or ""),
+                    document_kind="pptx",
+                    mode="pptx_image_question",
+                )
+            except Exception as exc:  # noqa: BLE001
+                segment = SegmentResult(
+                    error=f"PPTX vision read failed: {exc}",
+                    extras={"mode": "pptx_image_question", "question": question},
+                )
+            if segment.error is None and segment.text.strip():
                 return segment
             fallback = persisted_document_image_segment(
                 file_row,
                 args,
                 mode="pptx_image_question",
-                warning=segment.error,
+                warning=segment.error or "vision model returned no PPTX image answer",
             )
             if fallback.error is None:
                 return fallback
+            if segment.error is None:
+                return SegmentResult(
+                    error="vision model returned no PPTX image answer",
+                    extras=dict(segment.extras or {}),
+                )
             return segment
 
         slides, _coverage = await self._extract_slides_with_coverage(
@@ -159,10 +196,8 @@ class PptxPipeline(Pipeline):
             anchor_key="slide",
         )
         source_result = self._slice(slides, args, file_row=file_row)
-        if (
-            source_result.error is None
-            and source_result.text.strip()
-            and "(no extractable text)" not in source_result.text
+        if source_result.error is None and _has_meaningful_pptx_text(
+            source_result.text
         ):
             return source_result
         fallback = persisted_document_image_segment(
@@ -184,21 +219,69 @@ class PptxPipeline(Pipeline):
         """Bytes-first variant used by ArchivePipeline for member peeks."""
         question = str(args.get("question") or "").strip()
         if question:
-            settings = get_settings()
-            images = await asyncio.to_thread(_extract_pptx_images, body)
-            return await answer_document_image_question(
-                settings=settings,
-                images=images,
-                args=args,
-                document_name=filename or "archive member",
-                document_kind="pptx",
-                mode="pptx_image_question",
+            source = await self._source_segment_from_body(
+                body,
+                args,
+                file_row=None,
+                include_persisted_vision=False,
             )
+            source_answer = prefer_source_text_for_question(
+                source,
+                mode="pptx_text_question",
+                question=question,
+                answered_by="pptx_extracted_text",
+            )
+            if source_answer is not None and _has_meaningful_pptx_text(
+                source_answer.text
+            ):
+                return source_answer
+            settings = get_settings()
+            try:
+                images = await asyncio.to_thread(_extract_pptx_images, body)
+                segment = await answer_document_image_question(
+                    settings=settings,
+                    images=images,
+                    args=args,
+                    document_name=filename or "archive member",
+                    document_kind="pptx",
+                    mode="pptx_image_question",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return SegmentResult(error=f"PPTX vision read failed: {exc}")
+            if segment.error is None and not segment.text.strip():
+                return SegmentResult(
+                    error="vision model returned no PPTX image answer",
+                    extras=dict(segment.extras or {}),
+                )
+            return segment
         try:
             slides, _coverage = self._render_from_bytes_with_coverage(body)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"pptx parse failed: {exc}")
         return self._slice(slides, args, file_row=None)
+
+    async def _source_segment_from_body(
+        self,
+        body: bytes,
+        args: dict[str, Any],
+        *,
+        file_row: Any | None,
+        include_persisted_vision: bool,
+    ) -> SegmentResult:
+        try:
+            slides, _coverage = await asyncio.to_thread(
+                self._render_from_bytes_with_coverage,
+                body,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"pptx parse failed: {exc}")
+        if include_persisted_vision and file_row is not None:
+            slides = inline_document_image_vision_text(
+                slides,
+                persisted_document_image_payload(file_row),
+                anchor_key="slide",
+            )
+        return self._slice(slides, args, file_row=file_row)
 
     def _slice(
         self,
@@ -356,6 +439,17 @@ class PptxPipeline(Pipeline):
         return slides, coverage
 
 
+def _has_meaningful_pptx_text(text: str) -> bool:
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line == "(no extractable text)":
+            continue
+        if re.fullmatch(r"# Slide \d+", line):
+            continue
+        return True
+    return False
+
+
 def _extract_pptx_images(body: bytes, max_slides: int | None = None) -> list[DocumentImage]:
     try:
         from pptx import Presentation  # type: ignore
@@ -437,6 +531,32 @@ def _render_slide(slide: Any, slide_no: int) -> tuple[str, dict[str, int]]:
         "table_count": table_count,
         "notes_count": notes_count,
     }
+
+
+def _slide_sections(
+    slides: list[str],
+    *,
+    indexed_chars: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build deterministic slide anchors for model and fallback indexing."""
+    sections: list[dict[str, Any]] = []
+    consumed = 0
+    for index, slide_text in enumerate(slides, start=1):
+        if indexed_chars is not None and consumed >= indexed_chars:
+            break
+        lines = [line.strip() for line in slide_text.splitlines() if line.strip()]
+        first = lines[0] if lines else ""
+        title = first.removeprefix("# ").strip() or f"Slide {index}"
+        summary = " ".join(lines[1:])[:300]
+        sections.append({
+            "id": f"s{index}",
+            "title": title,
+            "anchor": {"unit": "slides", "value": str(index)},
+            "summary": summary,
+            "key_terms": [],
+        })
+        consumed += len(slide_text) + 2
+    return sections
 
 
 def _iter_shape_lines(shapes: Any, *, skip_shape: Any = None):

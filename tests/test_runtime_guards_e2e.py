@@ -507,7 +507,8 @@ async def test_final_answer_continuation_is_buffered() -> None:
     assert done["truncated"] is False, done
     assert done["llm_calls"] == 3, done
     assert len(chat.requests) == 3, len(chat.requests)
-    assert chat.requests[2].tools is None
+    assert chat.requests[2].tools == chat.requests[1].tools
+    assert chat.requests[2].tool_choice == "none"
     assert chat.requests[2].tool_choice == "none"
 
     factory = get_session_factory()

@@ -6,21 +6,32 @@ agent prompt does not need to carry that workflow in detail.
 """
 from __future__ import annotations
 
+import logging
 import re
+import time
 from typing import Any, Mapping
 
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from marginalia.agent.text_query import normalize_text_queries
-from marginalia.agent.tools import ToolContext, tool
+from marginalia.agent.tools import ToolContext, ToolPolicy, tool
 from marginalia.agent.tools.resolve_tag import resolve_tag
 from marginalia.agent.tools.search_journal import run_search_journal
 from marginalia.agent.tools.search_metadata import search_metadata
 from marginalia.config import get_settings
+from marginalia.db.models import EntryRelation, File, FileEntry
 from marginalia.repositories import entries as entries_repo
-from marginalia.repositories import entry_relations as relations_repo
-from marginalia.semantic.index import semantic_entry_rows, semantic_recall_configured
+from marginalia.semantic.index import (
+    best_semantic_sections,
+    semantic_entry_rows,
+    semantic_recall_configured,
+    semantic_section_text,
+)
 from marginalia.semantic.rerank import RerankHit, get_rerank_client, rerank_configured
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_LIMIT = 100
@@ -72,6 +83,7 @@ SCHEMA: dict[str, Any] = {
         "and file reading."
     ),
     schema=SCHEMA,
+    policy=ToolPolicy(concurrency="session_serial"),
 )
 async def recall_knowledge(
     db: AsyncSession,
@@ -87,7 +99,10 @@ async def recall_knowledge(
     unresolved_terms: list[str] = []
     metadata_tag_ids: list[str] = []
     journal_tag_terms: list[str] = []
+    stages_ms: dict[str, int] = {}
+    degraded: list[dict[str, str]] = []
 
+    started = time.monotonic()
     for tag in raw_tags:
         tag_name, facet = _parse_tag_seed(tag)
         resolve_args: dict[str, Any] = {"name": tag_name}
@@ -111,10 +126,12 @@ async def recall_knowledge(
             unresolved_terms.append(tag)
             _append_unique(journal_tag_terms, tag)
             _append_unique(text_terms, tag_name)
+    stages_ms["tag_resolution"] = _elapsed_ms(started)
 
     note_map: dict[str, dict[str, Any]] = {}
     trace: dict[str, Any] = {}
 
+    started = time.monotonic()
     if journal_tag_terms or text_terms:
         result = await run_search_journal(
             db,
@@ -123,9 +140,11 @@ async def recall_knowledge(
         )
         trace["journal"] = int(result.get("count") or 0)
         _merge_notes(note_map, result.get("notes") or [], "journal")
+    stages_ms["journal"] = _elapsed_ms(started)
 
     entry_map: dict[str, dict[str, Any]] = {}
 
+    started = time.monotonic()
     if metadata_tag_ids:
         result = await search_metadata(
             db, ctx, {"tags_any": metadata_tag_ids, "limit": fetch_limit},
@@ -139,8 +158,10 @@ async def recall_knowledge(
         )
         trace["metadata_text"] = int(result.get("count") or 0)
         _merge_entries(entry_map, result.get("entries") or [], "metadata_text")
+    stages_ms["metadata"] = _elapsed_ms(started)
 
     settings = get_settings()
+    started = time.monotonic()
     if text_terms and semantic_recall_configured():
         try:
             semantic_rows = await semantic_entry_rows(
@@ -151,14 +172,67 @@ async def recall_knowledge(
         except Exception as exc:  # noqa: BLE001
             trace["semantic_error"] = 1
             trace["semantic_error_message"] = str(exc)[:200]
+            degraded.append({"stage": "semantic", "error": str(exc)[:200]})
+            log.warning("semantic recall degraded to lexical metadata: %s", exc)
         else:
             trace["semantic"] = len(semantic_rows)
             _merge_entries(entry_map, semantic_rows, "semantic")
+    stages_ms["semantic"] = _elapsed_ms(started)
 
+    started = time.monotonic()
     ranked_entries = score_recall_entries(
         list(entry_map.values()),
         text_terms=text_terms,
     )
+    section_backfill_trace: dict[str, Any] = {
+        "attempted": 0,
+        "matched": 0,
+        "minimum_score": settings.section_backfill_min_score,
+    }
+    if text_terms and semantic_recall_configured():
+        window_size = max(
+            limit,
+            int(settings.rerank_top_n or limit) if rerank_configured(settings) else limit,
+        )
+        missing_section_ids = [
+            str(row["entry_id"])
+            for row in ranked_entries[:window_size]
+            if row.get("entry_id")
+            and not row.get("matched_section_id")
+            and "metadata_text" in set(row.get("matched_by") or [])
+        ]
+        section_backfill_trace["attempted"] = len(missing_section_ids)
+        if missing_section_ids:
+            try:
+                section_matches = await best_semantic_sections(
+                    " ".join(text_terms),
+                    missing_section_ids,
+                )
+            except Exception as exc:  # noqa: BLE001
+                section_backfill_trace["error"] = str(exc)[:200]
+                degraded.append({
+                    "stage": "section_backfill",
+                    "error": str(exc)[:200],
+                })
+                log.warning("semantic section backfill degraded: %s", exc)
+            else:
+                by_id = {
+                    str(row.get("entry_id") or ""): row
+                    for row in ranked_entries[:window_size]
+                }
+                for entry_id, (section_id, score) in section_matches.items():
+                    if score < settings.section_backfill_min_score:
+                        continue
+                    row = by_id.get(entry_id)
+                    if row is None or row.get("matched_section_id"):
+                        continue
+                    row["matched_section_id"] = section_id
+                    row["matched_section_score"] = round(score, 6)
+                    row["matched_section_origin"] = "section_backfill"
+                    row["evidence_level"] = "section"
+                    row["match_origin"] = "section_backfill"
+                    row["evidence_score"] = round(score, 6)
+                    section_backfill_trace["matched"] += 1
     rerank_trace: dict[str, Any] = {"enabled": False}
     if text_terms and rerank_configured(settings):
         ranked_entries, rerank_trace = await rerank_recall_entries(
@@ -166,13 +240,21 @@ async def recall_knowledge(
             ranked_entries,
             query=" ".join(text_terms),
         )
+        if rerank_trace.get("error"):
+            degraded.append({
+                "stage": "rerank",
+                "error": str(rerank_trace["error"])[:200],
+            })
+    stages_ms["scoring_rerank"] = _elapsed_ms(started)
     entries = select_evidence_entries(ranked_entries, limit)
     notes = list(note_map.values())[:limit]
     candidate_entry_ids = _candidate_entry_ids(notes, entries, limit)
+    started = time.monotonic()
     expansion_entry_ids = await _one_hop_expansion_ids(
         db, candidate_entry_ids, limit=limit,
     )
     verify_entry_ids = _verification_batch(candidate_entry_ids, expansion_entry_ids)
+    stages_ms["relation_expansion"] = _elapsed_ms(started)
 
     return {
         "resolved_tags": resolved_tags,
@@ -205,8 +287,15 @@ async def recall_knowledge(
                 ),
             },
             "rerank": rerank_trace,
+            "section_backfill": section_backfill_trace,
+            "stages_ms": stages_ms,
+            "degraded": degraded,
         },
     }
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
 
 
 def _limit(value: Any) -> int:
@@ -320,6 +409,10 @@ def _merge_entries(
                 "catalog_id": entry.get("catalog_id"),
                 "folder_id": entry.get("folder_id"),
                 "coverage": entry.get("coverage"),
+                "matched_section_id": entry.get("matched_section_id"),
+                "evidence_level": entry.get("evidence_level"),
+                "match_origin": entry.get("match_origin"),
+                "evidence_score": entry.get("evidence_score"),
                 "matched_by": [],
                 "score": 0.0,
                 "rank_score": 0,
@@ -327,6 +420,11 @@ def _merge_entries(
                 "score_components": {},
             }
             entry_map[entry_id] = existing
+        if not existing.get("matched_section_id") and entry.get("matched_section_id"):
+            existing["matched_section_id"] = entry.get("matched_section_id")
+        for key in ("evidence_level", "match_origin", "evidence_score"):
+            if existing.get(key) is None and entry.get(key) is not None:
+                existing[key] = entry.get(key)
         _append_unique(existing["matched_by"], source)
         rank_key = _rank_key_for_source(source)
         if rank_key:
@@ -446,6 +544,11 @@ async def rerank_recall_entries(
     documents_by_id = await load_rerank_documents_by_entry_id(
         db,
         [str(row.get("entry_id") or "") for row in top],
+        matched_section_ids={
+            str(row["entry_id"]): str(row["matched_section_id"])
+            for row in top
+            if row.get("entry_id") and row.get("matched_section_id")
+        },
     )
     return await rerank_recall_entries_with_documents(
         ranked,
@@ -476,6 +579,7 @@ async def rerank_recall_entries_with_documents(
             top_n=len(documents),
         )
     except Exception as exc:  # noqa: BLE001
+        log.warning("rerank degraded to deterministic recall order: %s", exc)
         return ranked, {
             "enabled": True,
             "attempted": top_n,
@@ -535,6 +639,8 @@ def apply_rerank_hits(
 async def load_rerank_documents_by_entry_id(
     db: AsyncSession,
     entry_ids: list[str],
+    *,
+    matched_section_ids: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     clean = [entry_id for entry_id in _dedupe(entry_ids) if entry_id]
     if not clean:
@@ -548,7 +654,16 @@ async def load_rerank_documents_by_entry_id(
         if pair is None:
             continue
         entry, file_row = pair
-        out[entry_id] = _truncate(
+        section_text = ""
+        section_id = (matched_section_ids or {}).get(entry_id)
+        if section_id:
+            section_text = semantic_section_text(
+                getattr(file_row, "description", None),
+                summary=getattr(file_row, "summary", None),
+                section_id=section_id,
+                max_chars=max(200, int(settings.rerank_max_doc_chars or 1800)),
+            )
+        out[entry_id] = section_text or _truncate(
             _rerank_document_text(entry, file_row),
             max(200, int(settings.rerank_max_doc_chars or 1800)),
         )
@@ -868,38 +983,75 @@ async def _one_hop_expansion_ids(
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
-    expansion: dict[str, dict[str, Any]] = {}
-    anchors = set(anchor_entry_ids)
-    if not anchor_entry_ids:
+    clean_anchors = _dedupe([str(item) for item in anchor_entry_ids if item])
+    if not clean_anchors or limit <= 0:
         return []
-    per_anchor_limit = max(1, min(10, limit))
-    for anchor_id in anchor_entry_ids[:limit]:
-        rel_rows = await relations_repo.list_top_for_entry(
-            db, anchor_id, limit=per_anchor_limit, vetted_only=True,
+    anchors = set(clean_anchors)
+    entry_a = aliased(FileEntry, name="relation_entry_a")
+    entry_b = aliased(FileEntry, name="relation_entry_b")
+    file_a = aliased(File, name="relation_file_a")
+    file_b = aliased(File, name="relation_file_b")
+    a_is_anchor = EntryRelation.entry_a_id.in_(clean_anchors)
+    other_entry_id = case(
+        (a_is_anchor, EntryRelation.entry_b_id),
+        else_=EntryRelation.entry_a_id,
+    )
+    anchor_entry_id = case(
+        (a_is_anchor, EntryRelation.entry_a_id),
+        else_=EntryRelation.entry_b_id,
+    )
+    # One related entry can be connected to every anchor. Fetch enough rows
+    # to still return `limit` unique related entries after Python aggregation.
+    row_limit = max(limit, limit * len(clean_anchors))
+    stmt = (
+        select(
+            other_entry_id.label("entry_id"),
+            anchor_entry_id.label("anchor_entry_id"),
+            EntryRelation.observation_count,
         )
-        for relation in rel_rows:
-            other_id = (
-                relation.entry_b_id
-                if relation.entry_a_id == anchor_id
-                else relation.entry_a_id
-            )
-            if other_id in anchors:
-                continue
-            row = expansion.get(other_id)
-            if row is None:
-                row = {
-                    "entry_id": other_id,
-                    "matched_by": [],
-                    "anchor_entry_ids": [],
-                    "observation_count": relation.observation_count,
-                }
-                expansion[other_id] = row
-            _append_unique(row["matched_by"], "vetted_relation")
-            _append_unique(row["anchor_entry_ids"], anchor_id)
-            row["observation_count"] = max(
-                int(row.get("observation_count") or 0),
-                int(relation.observation_count or 0),
-            )
+        .join(entry_a, entry_a.id == EntryRelation.entry_a_id)
+        .join(entry_b, entry_b.id == EntryRelation.entry_b_id)
+        .join(file_a, file_a.id == entry_a.file_id)
+        .join(file_b, file_b.id == entry_b.file_id)
+        .where(
+            EntryRelation.vetted.is_(True),
+            or_(
+                EntryRelation.entry_a_id.in_(clean_anchors),
+                EntryRelation.entry_b_id.in_(clean_anchors),
+            ),
+            ~and_(
+                EntryRelation.entry_a_id.in_(clean_anchors),
+                EntryRelation.entry_b_id.in_(clean_anchors),
+            ),
+            entry_a.deleted_at.is_(None),
+            entry_b.deleted_at.is_(None),
+            entry_a.lifecycle.in_(entries_repo.ACTIVE_LIFECYCLES),
+            entry_b.lifecycle.in_(entries_repo.ACTIVE_LIFECYCLES),
+            file_a.deleted_at.is_(None),
+            file_b.deleted_at.is_(None),
+            file_a.ingest_status == "done",
+            file_b.ingest_status == "done",
+        )
+        .order_by(EntryRelation.observation_count.desc(), other_entry_id.asc())
+        .limit(row_limit)
+    )
+    expansion: dict[str, dict[str, Any]] = {}
+    for other_id, anchor_id, observation_count in (await db.execute(stmt)).all():
+        clean_other_id = str(other_id or "")
+        clean_anchor_id = str(anchor_id or "")
+        if not clean_other_id or clean_other_id in anchors:
+            continue
+        row = expansion.setdefault(clean_other_id, {
+            "entry_id": clean_other_id,
+            "matched_by": ["vetted_relation"],
+            "anchor_entry_ids": [],
+            "observation_count": int(observation_count or 0),
+        })
+        _append_unique(row["anchor_entry_ids"], clean_anchor_id)
+        row["observation_count"] = max(
+            int(row.get("observation_count") or 0),
+            int(observation_count or 0),
+        )
     return sorted(
         expansion.values(),
         key=lambda row: (-int(row.get("observation_count") or 0), row["entry_id"]),

@@ -25,7 +25,7 @@ import logging
 import re
 from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI, BadRequestError
+from openai import BadRequestError
 
 from marginalia.config import LlmProfile
 from marginalia.llm.base import AudioClient, ChatClient
@@ -45,6 +45,7 @@ from marginalia.llm.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from marginalia.provider_clients import get_openai_compatible_client
 
 log = logging.getLogger(__name__)
 
@@ -86,27 +87,35 @@ class OpenAIChatClient(ChatClient):
         self.provider = profile.provider
         self.base_url = profile.base_url
         self.model = profile.model
+        self.capabilities = profile.capabilities
         self._supports_json_schema = profile.provider == "openai"
         self._compat_dialect = detect_openai_compatible_dialect(profile)
-        self._client = AsyncOpenAI(api_key=profile.api_key, base_url=profile.base_url)
+        self._client = get_openai_compatible_client(
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+        )
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         if request.tools and request.json_schema:
             raise ValueError("ChatRequest.tools and json_schema are mutually exclusive")
 
         messages = self._render_messages(request)
-        max_token_param = (
-            "max_tokens"
-            if self._compat_dialect == "ollama"
-            else "max_completion_tokens"
-        )
+        output_limit = int(request.max_tokens)
+        if output_limit < 0:
+            raise ValueError("max_tokens must be non-negative")
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            max_token_param: request.max_tokens,
         }
-        if self._supports_temperature(self.model, request.reasoning_effort):
+        if output_limit > 0:
+            kwargs[self.capabilities.token_limit_param] = output_limit
+        if (
+            self.capabilities.supports_temperature
+            and self._supports_temperature(self.model, request.reasoning_effort)
+        ):
             kwargs["temperature"] = request.temperature
+        if request.tools and not self.capabilities.supports_tools:
+            raise ValueError(f"profile {self.profile_name} does not support tool calling")
         apply_openai_reasoning_controls(
             kwargs,
             request,
@@ -157,10 +166,10 @@ class OpenAIChatClient(ChatClient):
 
     @staticmethod
     def _supports_temperature(model: str, reasoning_effort: str | None = None) -> bool:
+        del model
         if reasoning_effort and reasoning_effort.lower() != "none":
             return False
-        model_l = model.lower()
-        return not any(token in model_l for token in ("gpt-5", "o1", "o3", "o4"))
+        return True
 
     @staticmethod
     def _inject_schema_into_system(messages: list[dict[str, Any]], schema: dict[str, Any]) -> None:
@@ -311,10 +320,14 @@ class OpenAIChatClient(ChatClient):
                         or 0
                     )
         usage = TokenUsage(
-            input_tokens=getattr(usage_obj, "prompt_tokens", 0) or 0,
+            input_tokens=max(
+                0,
+                (getattr(usage_obj, "prompt_tokens", 0) or 0) - cache_read,
+            ),
             output_tokens=getattr(usage_obj, "completion_tokens", 0) or 0,
             cache_read_tokens=cache_read,
             cache_creation_tokens=0,
+            prompt_tokens=getattr(usage_obj, "prompt_tokens", 0) or 0,
         )
 
         return ChatResponse(
@@ -410,7 +423,10 @@ class OpenAIAudioClient(AudioClient):
             )
         self.profile_name = profile.name
         self.model = profile.model
-        self._client = AsyncOpenAI(api_key=profile.api_key, base_url=profile.base_url)
+        self._client = get_openai_compatible_client(
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+        )
 
     async def transcribe(
         self,

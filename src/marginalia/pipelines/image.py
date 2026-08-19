@@ -51,6 +51,7 @@ from marginalia.pipelines.base import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 _DEFAULT_GET_CHAT_CLIENT = get_chat_client
@@ -153,7 +154,8 @@ class ImagePipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body = await self._read_bytes(storage, ctx.storage_key)
+        with measure_stage("extraction"):
+            body = await self._read_bytes(storage, ctx.storage_key)
         if not has_vision_profile():
             return _metadata_only_image_result(
                 ctx,
@@ -163,7 +165,8 @@ class ImagePipeline(Pipeline):
                     "vision indexing did not run because no vision profile is configured."
                 ),
             )
-        prepared = downscale_for_vlm(body)
+        with measure_stage("extraction"):
+            prepared = downscale_for_vlm(body)
         if prepared is None:
             return _metadata_only_image_result(
                 ctx,
@@ -189,20 +192,21 @@ class ImagePipeline(Pipeline):
         client = get_chat_client("vision")
         extra_body = _disable_thinking_for_vlm(client)
         try:
-            resp = await client.complete(ChatRequest(
-                system=IMAGE_PIPELINE_SYSTEM,
-                messages=cacheable_prompt_messages(
-                    stable_prefix,
-                    [
-                        TextBlock(text=file_context),
-                        ImageBlock(media_type=media_type, data_b64=b64),
-                    ],
-                ),
-                max_tokens=4096,
-                temperature=0.2,
-                cache_breakpoints=[0],
-                extra_body=extra_body,
-            ))
+            with measure_stage("vision"):
+                resp = await client.complete(ChatRequest(
+                    system=IMAGE_PIPELINE_SYSTEM,
+                    messages=cacheable_prompt_messages(
+                        stable_prefix,
+                        [
+                            TextBlock(text=file_context),
+                            ImageBlock(media_type=media_type, data_b64=b64),
+                        ],
+                    ),
+                    max_tokens=4096,
+                    temperature=0.2,
+                    cache_breakpoints=[0],
+                    extra_body=extra_body,
+                ))
         except Exception as exc:  # noqa: BLE001
             log.warning("image vision indexing failed for %s: %s", ctx.display_name, exc)
             return _metadata_only_image_result(
@@ -304,23 +308,26 @@ class ImagePipeline(Pipeline):
         storage: StorageBackend,
     ) -> SegmentResult:
         if not has_vision_profile():
-            return SegmentResult(error=(
-                "image read with `question` requires the `vision` LLM "
-                "profile; configure it or omit `question` to fall back "
-                "to the persisted description"
-            ), extras={"kind": "image"})
+            return _persisted_image_question_fallback(
+                file_row=file_row,
+                question=question,
+                warning="vision profile is not configured",
+            )
         try:
             body = await self._read_bytes(storage, file_row.storage_key)
         except Exception as exc:  # noqa: BLE001
-            return SegmentResult(error=f"image read failed: {exc}",
-                                 extras={"kind": "image"})
+            return _persisted_image_question_fallback(
+                file_row=file_row,
+                question=question,
+                warning=f"image read failed: {exc}",
+            )
         prepared = downscale_for_vlm(body)
         if prepared is None:
             prepared = body, "image/png"
         scaled, media_type = prepared
         b64 = base64.b64encode(scaled).decode("ascii")
-        client = get_chat_client("vision")
         try:
+            client = get_chat_client("vision")
             extra_body = _disable_thinking_for_vlm(client)
             resp = await client.complete(ChatRequest(
                 system=(
@@ -339,11 +346,20 @@ class ImagePipeline(Pipeline):
                 extra_body=extra_body,
             ))
         except Exception as exc:  # noqa: BLE001
-            return SegmentResult(error=f"VLM call failed: {exc}",
-                                 extras={"kind": "image"})
+            return _persisted_image_question_fallback(
+                file_row=file_row,
+                question=question,
+                warning=f"image vision read failed: {exc}",
+            )
         text = strip_reasoning_text(resp.text).strip()
+        if not text:
+            return _persisted_image_question_fallback(
+                file_row=file_row,
+                question=question,
+                warning="vision model returned no image answer",
+            )
         return SegmentResult(
-            text=text or "(VLM returned empty response)",
+            text=text,
             extras={
                 "kind": "image",
                 "vlm_used": True,
@@ -411,8 +427,18 @@ class ImagePipeline(Pipeline):
                 extras={"kind": "image", "filename": filename, "bytes": len(body)},
             )
         text = strip_reasoning_text(resp.text).strip()
+        if not text:
+            return SegmentResult(
+                error="vision model returned no image answer",
+                extras={
+                    "kind": "image",
+                    "filename": filename,
+                    "bytes": len(body),
+                    "scaled_bytes": len(scaled),
+                },
+            )
         return SegmentResult(
-            text=text or f"[image: {filename or 'unknown'}, ~{max(1, len(body) // 1024)} KB]",
+            text=text,
             extras={
                 "kind": "image",
                 "filename": filename,
@@ -420,6 +446,26 @@ class ImagePipeline(Pipeline):
                 "scaled_bytes": len(scaled),
             },
         )
+
+
+def _persisted_image_question_fallback(
+    *,
+    file_row: Any,
+    question: str,
+    warning: str,
+) -> SegmentResult:
+    text = _render_image_description(file_row)
+    return SegmentResult(
+        text=text,
+        error=None if text else warning,
+        extras={
+            "kind": "image",
+            "mode": "image_question",
+            "question": question,
+            "answered_by": "persisted_description",
+            "warning": warning,
+        },
+    )
 
 
 

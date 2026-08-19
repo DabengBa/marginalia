@@ -44,6 +44,7 @@ from marginalia.repositories import tags as tags_repo
 from marginalia.semantic.index import refresh_semantic_index_for_file
 from marginalia.storage import get_storage
 from marginalia.tasks.kinds import KIND_INGEST_FILE, task_handler
+from marginalia.tasks.usage import measure_stage
 from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
@@ -61,65 +62,67 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
     storage = get_storage()
 
     # --- phase 1: mark processing ------------------------------------------
-    async with session_scope() as session:
-        file_row = await session.get(File, file_id)
-        if file_row is None:
-            raise ValueError(f"file_id {file_id!r} not found")
-        if file_row.deleted_at is not None:
-            log.info("file %s already deleted; skipping ingest", file_id)
-            await session.commit()
-            return
-        if file_row.ingested_at is not None:
-            log.info("file %s already ingested; skipping", file_id)
-            await session.commit()
-            return
+    with measure_stage("status_persist"):
+        async with session_scope() as session:
+            file_row = await session.get(File, file_id)
+            if file_row is None:
+                raise ValueError(f"file_id {file_id!r} not found")
+            if file_row.deleted_at is not None:
+                log.info("file %s already deleted; skipping ingest", file_id)
+                await session.commit()
+                return
+            if file_row.ingest_status == "done":
+                log.info("file %s already ingested; skipping", file_id)
+                await session.commit()
+                return
 
-        now = _utcnow()
-        file_row.ingest_status = "processing"
-        file_row.updated_at = now
-        await audit_events_repo.append(
-            session,
-            kind="ingest_status_changed",
-            payload={"file_id": file_id, "status": "processing"},
-        )
-
-        snapshot_storage_key = file_row.storage_key
-        snapshot_sha = file_row.sha256
-        snapshot_size = file_row.size_bytes
-        snapshot_mime = file_row.mime_type
-        snapshot_ext = file_row.original_ext
-
-        # Choose the entry we'll attach AI fields to: the oldest non-deleted
-        # one. (Multiple entries with same file_id can exist via dedup; the
-        # other entries get filled later if they're new — see services.upload
-        # which already seeds them on dedup.)
-        entry = await entries_repo.find_first_live_for_file(session, file_id)
-        if entry is None:
-            log.warning("file %s has no live entry; aborting ingest", file_id)
+            now = _utcnow()
+            file_row.ingest_status = "processing"
+            file_row.updated_at = now
             await audit_events_repo.append(
                 session,
                 kind="ingest_status_changed",
-                payload={"file_id": file_id, "status": "failed", "reason": "no_live_entry"},
+                payload={"file_id": file_id, "status": "processing"},
             )
-            file_row.ingest_status = "failed"
-            file_row.updated_at = _utcnow()
-            await session.commit()
-            return
 
-        ctx = await _build_context(
-            session,
-            entry=entry,
-            file_id=file_id,
-            storage_key=snapshot_storage_key,
-            sha256=snapshot_sha,
-            size=snapshot_size,
-            mime=snapshot_mime,
-            ext=snapshot_ext,
-            display_name=entry.display_name,
-        )
-        entry_id = entry.id
-        snapshot_filename = entry.display_name
-        await session.commit()
+            snapshot_storage_key = file_row.storage_key
+            snapshot_sha = file_row.sha256
+            snapshot_size = file_row.size_bytes
+            snapshot_mime = file_row.mime_type
+            snapshot_ext = file_row.original_ext
+
+            # Choose the oldest live entry as the target for position fields.
+            entry = await entries_repo.find_first_live_for_file(session, file_id)
+            if entry is None:
+                log.warning("file %s has no live entry; aborting ingest", file_id)
+                await audit_events_repo.append(
+                    session,
+                    kind="ingest_status_changed",
+                    payload={
+                        "file_id": file_id,
+                        "status": "failed",
+                        "reason": "no_live_entry",
+                    },
+                )
+                file_row.ingest_status = "failed"
+                file_row.updated_at = _utcnow()
+                await session.commit()
+                return
+
+            ctx = await _build_context(
+                session,
+                entry=entry,
+                file_id=file_id,
+                storage_key=snapshot_storage_key,
+                sha256=snapshot_sha,
+                size=snapshot_size,
+                mime=snapshot_mime,
+                ext=snapshot_ext,
+                display_name=entry.display_name,
+            )
+            entry_id = entry.id
+            snapshot_filename = entry.display_name
+            await session.commit()
 
     pipeline = resolve_pipeline(
         snapshot_mime, snapshot_ext, filename=snapshot_filename,
@@ -130,16 +133,19 @@ async def handle_ingest_file(payload: Mapping[str, Any]) -> None:
 
     # --- phase 2: pipeline -------------------------------------------------
     try:
-        result = await pipeline.run(ctx=ctx, storage=storage)
+        with measure_stage("pipeline_total"):
+            result = await pipeline.run(ctx=ctx, storage=storage)
     except Exception:
         await _mark_failed(file_id, reason="pipeline_exception")
         raise
 
     # --- phase 3: persist --------------------------------------------------
-    async with session_scope() as session:
-        await _persist(session, file_id=file_id, entry_id=entry_id, result=result)
-        await session.commit()
-    await _refresh_semantic_index(file_id)
+    with measure_stage("status_persist"):
+        async with session_scope() as session:
+            await _persist(session, file_id=file_id, entry_id=entry_id, result=result)
+            await session.commit()
+    with measure_stage("embedding"):
+        await _refresh_semantic_index(file_id)
 
 
 def _utcnow() -> datetime:
@@ -174,6 +180,7 @@ async def _refresh_semantic_index(file_id: str) -> None:
                         "entries_removed": result.entries_removed,
                         "entries_refreshed": result.entries_refreshed,
                         "entries_total": result.entries_total,
+                        "vectors_reused": result.vectors_reused,
                         "total_tokens": result.total_tokens,
                     },
                 )

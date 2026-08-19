@@ -26,6 +26,7 @@ import os
 from typing import Any
 
 from marginalia.agent.compression_adapter import maybe_compress_archive_peeks
+from marginalia.pipelines._long_index import ingest_output_tokens
 from marginalia.llm import (
     ChatRequest, cacheable_prompt_messages, get_chat_client,
 )
@@ -42,6 +43,7 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines.registry import register_pipeline, resolve_pipeline
 from marginalia.storage import open_archive
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +164,8 @@ class ArchivePipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body = await _read_all(storage, ctx.storage_key)
+        with measure_stage("extraction"):
+            body = await _read_all(storage, ctx.storage_key)
         filename = _filename_from_ctx(ctx)
         archive_kind = _guess_archive_kind(filename)
 
@@ -216,13 +219,14 @@ class ArchivePipeline(Pipeline):
                 f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>"
             )
             client = get_chat_client("ingest")
-            resp = await client.complete(ChatRequest(
-                system=ARCHIVE_PIPELINE_SYSTEM,
-                messages=cacheable_prompt_messages(stable_prefix, file_content),
-                max_tokens=4096,
-                temperature=0.2,
-                cache_breakpoints=[0],
-            ))
+            with measure_stage("intelligence"):
+                resp = await client.complete(ChatRequest(
+                    system=ARCHIVE_PIPELINE_SYSTEM,
+                    messages=cacheable_prompt_messages(stable_prefix, file_content),
+                    max_tokens=ingest_output_tokens(len(file_content)),
+                    temperature=0.2,
+                    cache_breakpoints=[0],
+                ))
 
         tagged = parse_tagged(resp.text or "")
         summary = tagged.get("summary", "").strip()

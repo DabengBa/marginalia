@@ -26,6 +26,7 @@ to delete on its own.
 """
 from __future__ import annotations
 
+from hashlib import sha256
 import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -39,9 +40,15 @@ from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
+from marginalia.config import get_settings
 from marginalia.storage import get_storage
 from marginalia.storage.base import StorageBackend
-from marginalia.tasks.kinds import KIND_PURGE_DELETED_FILES, task_handler
+from marginalia.tasks.enqueue import enqueue
+from marginalia.tasks.kinds import (
+    KIND_DELETE_STORAGE_OBJECT,
+    KIND_PURGE_DELETED_FILES,
+    task_handler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +105,38 @@ async def handle_purge_deleted_files(payload: Mapping[str, Any]) -> None:
                         "size_bytes": file_row.size_bytes,
                     },
                 )
+                delete_payload = _storage_delete_payload(
+                    storage_key=storage_key,
+                    file_id=file_id,
+                )
+                target_hash = sha256(
+                    "\0".join((
+                        str(delete_payload["storage_backend"]),
+                        str(delete_payload.get("storage_root") or ""),
+                        str(delete_payload.get("bucket") or ""),
+                        str(delete_payload.get("endpoint_url") or ""),
+                        storage_key,
+                    )).encode("utf-8")
+                ).hexdigest()
+                delete_task = await enqueue(
+                    session,
+                    kind=KIND_DELETE_STORAGE_OBJECT,
+                    payload=delete_payload,
+                    dedup_key=f"{KIND_DELETE_STORAGE_OBJECT}:{target_hash}",
+                    max_attempts=10,
+                )
+                if delete_task is not None:
+                    await audit_events_repo.append(
+                        session,
+                        kind="task_enqueued",
+                        task_id=delete_task.id,
+                        payload={
+                            "task_id": delete_task.id,
+                            "kind": KIND_DELETE_STORAGE_OBJECT,
+                            "file_id": file_id,
+                            "storage_key": storage_key,
+                        },
+                    )
                 pending_storage_deletes.append((file_id, storage_key))
                 files_purged += 1
 
@@ -142,3 +181,23 @@ async def _delete_storage_object(
                 await session.commit()
         except Exception:
             log.exception("could not even audit storage delete failure")
+
+
+def _storage_delete_payload(*, storage_key: str, file_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    payload: dict[str, Any] = {
+        "storage_backend": settings.storage_backend,
+        "storage_key": storage_key,
+        "file_id": file_id,
+    }
+    if settings.storage_backend == "local":
+        payload["storage_root"] = settings.local_storage_root
+    elif settings.storage_backend == "mirror":
+        payload["storage_root"] = settings.mirror_vault_root
+    else:
+        payload.update({
+            "bucket": settings.s3_bucket,
+            "endpoint_url": settings.s3_endpoint_url,
+            "region": settings.s3_region,
+        })
+    return payload

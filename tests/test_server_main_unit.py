@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
+from marginalia import __version__
 from marginalia import server_main
 
 
@@ -96,3 +99,28 @@ def test_server_main_reads_home_env_when_cwd_has_no_env(tmp_path, monkeypatch) -
     assert rc == 0
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8766
+
+
+@pytest.mark.asyncio
+async def test_health_exposes_build_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from marginalia.config import get_settings
+    from marginalia.main import health
+
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("BUILD_SHA", "abc123")
+    monkeypatch.setenv("BUILD_ID", "build-42")
+    get_settings.cache_clear()
+    try:
+        storage_backend = get_settings().storage_backend
+        payload = await health()
+    finally:
+        get_settings.cache_clear()
+
+    assert payload == {
+        "status": "ok",
+        "version": __version__,
+        "git_sha": "abc123",
+        "build_id": "build-42",
+        "environment": "staging",
+        "storage_backend": storage_backend,
+    }

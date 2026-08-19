@@ -175,13 +175,21 @@ async def reschedule_for_retry(
 
 
 async def heartbeat(
-    db: AsyncSession, *, task_id: str, lease_until: datetime, now: datetime,
-) -> None:
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id, Task.status == "running")
+    db: AsyncSession,
+    *,
+    task_id: str,
+    lease_until: datetime,
+    now: datetime,
+    worker_id: str | None = None,
+) -> bool:
+    stmt = update(Task).where(Task.id == task_id, Task.status == "running")
+    if worker_id is not None:
+        stmt = stmt.where(Task.locked_by == worker_id)
+    result = await db.execute(
+        stmt
         .values(lease_expires_at=lease_until, last_heartbeat_at=now)
     )
+    return bool(result.rowcount or 0)
 
 
 async def list_stale_running_ids(
@@ -204,7 +212,7 @@ async def list_stale_running_ids(
 
 
 async def list_stale_running(
-    db: AsyncSession, *, now: datetime,
+    db: AsyncSession, *, now: datetime, limit: int = 500,
 ) -> list[Task]:
     """Full Task rows for stale-running ids — recover_stuck_tasks needs the
     attempt counts and previous lease/locked_by to write an audit event."""
@@ -215,35 +223,69 @@ async def list_stale_running(
                 Task.lease_expires_at.isnot(None),
                 Task.lease_expires_at < now,
             )
+            .order_by(Task.lease_expires_at.asc())
+            .limit(max(1, limit))
         )
     ).scalars().all()
     return list(rows)
 
 
 async def revive_running_to_pending(
-    db: AsyncSession, *, task_id: str, now: datetime,
-) -> None:
+    db: AsyncSession,
+    *,
+    task_id: str,
+    now: datetime,
+    previous_worker_id: str | None = None,
+    previous_lease_expires_at: datetime | None = None,
+) -> bool:
     """Restore a stale-running row to pending so the worker pool can reclaim
     it. Used by recover_stuck_tasks."""
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id, Task.status == "running")
-        .values(_release_values(status="pending", scheduled_at=now))
+    stmt = update(Task).where(Task.id == task_id, Task.status == "running")
+    if previous_worker_id is not None:
+        stmt = stmt.where(Task.locked_by == previous_worker_id)
+    if previous_lease_expires_at is not None:
+        stmt = stmt.where(
+            Task.lease_expires_at == previous_lease_expires_at,
+            Task.lease_expires_at < now,
+        )
+    result = await db.execute(
+        stmt.values(_release_values(
+            status="pending",
+            scheduled_at=now,
+            started_at=None,
+            last_heartbeat_at=None,
+            last_error="recover_stuck_tasks: lease expired; returned to pending",
+        ))
     )
+    return bool(result.rowcount or 0)
 
 
 async def mark_running_dead(
-    db: AsyncSession, *, task_id: str, now: datetime, error: str,
-) -> None:
+    db: AsyncSession,
+    *,
+    task_id: str,
+    now: datetime,
+    error: str,
+    previous_worker_id: str | None = None,
+    previous_lease_expires_at: datetime | None = None,
+) -> bool:
     """Status='running' guarded mark_dead — used by recover_stuck_tasks
     when retries are exhausted."""
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id, Task.status == "running")
-        .values(_release_values(
+    stmt = update(Task).where(Task.id == task_id, Task.status == "running")
+    if previous_worker_id is not None:
+        stmt = stmt.where(Task.locked_by == previous_worker_id)
+    if previous_lease_expires_at is not None:
+        stmt = stmt.where(
+            Task.lease_expires_at == previous_lease_expires_at,
+            Task.lease_expires_at < now,
+        )
+    result = await db.execute(
+        stmt.values(_release_values(
             status="dead", finished_at=now, last_error=error,
+            last_heartbeat_at=None,
         ))
     )
+    return bool(result.rowcount or 0)
 
 
 async def has_inflight_for_kind(db: AsyncSession, kind: str) -> bool:

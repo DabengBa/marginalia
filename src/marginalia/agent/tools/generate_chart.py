@@ -21,7 +21,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.agent.tools import ToolContext, tool
+from marginalia.agent.tools import ToolContext, ToolPolicy, tool
 from marginalia.utils.ids import new_id
 
 
@@ -116,6 +116,11 @@ SCHEMA: dict[str, Any] = {
         "footnote like [^chart-1] and the chart_id."
     ),
     schema=SCHEMA,
+    policy=ToolPolicy(
+        access="write",
+        replay="idempotent",
+        concurrency="session_serial",
+    ),
 )
 async def generate_chart(
     db: AsyncSession,

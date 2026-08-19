@@ -9,8 +9,8 @@ firing:
   2. Dispatch per-session work that doesn't fit the global-kind pattern:
      for each session with ≥MIN_TURNS reflect_turn rows and no recent
      summarize outcome, enqueue summarize_session(session_id=sid).
-  3. Re-enqueue self (kind='periodic_tick') 10 minutes from now, with
-     dedup_key='periodic_tick' to keep at most one in flight.
+  3. Re-enqueue self (kind='periodic_tick') 10 minutes from now, with a
+     time-slot dedup key so the running tick cannot absorb its successor.
 
 `recover_stuck_tasks` / `prune` are dispatched through here — they appear
 in PERIODIC_INTERVALS. The tick itself is NOT listed there; it self-schedules
@@ -76,6 +76,13 @@ def _aware(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def periodic_tick_dedup_key(scheduled_at: datetime) -> str:
+    """Return the stable dedup key for a tick's 10-minute UTC time slot."""
+    aware = _aware(scheduled_at) or scheduled_at
+    slot = int(aware.timestamp() // TICK_INTERVAL_SECONDS)
+    return f"{KIND_PERIODIC_TICK}:{slot}"
 
 @task_handler(KIND_PERIODIC_TICK)
 async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
@@ -192,7 +199,7 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
             session,
             kind=KIND_PERIODIC_TICK,
             payload={},
-            dedup_key=KIND_PERIODIC_TICK,
+            dedup_key=periodic_tick_dedup_key(next_run),
             scheduled_at=next_run,
         )
 
@@ -362,6 +369,6 @@ async def bootstrap_periodic_tick() -> None:
             session,
             kind=KIND_PERIODIC_TICK,
             payload={"reason": "bootstrap"},
-            dedup_key=KIND_PERIODIC_TICK,
+            dedup_key=periodic_tick_dedup_key(_utcnow()),
         )
         await session.commit()

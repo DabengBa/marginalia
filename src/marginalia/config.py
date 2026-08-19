@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     )
 
     app_env: str = "dev"
+    build_sha: str = "unknown"
+    build_id: str = "local"
     marginalia_api_token: str | None = None
     marginalia_api_host: str = "127.0.0.1"
     marginalia_api_port: int = 8000
@@ -43,6 +45,9 @@ class Settings(BaseSettings):
     # sqlite db file always lives at `<marginalia_home>/marginalia.db`. Not an
     # env override — relocate the whole footprint via MARGINALIA_HOME instead.
     postgres_dsn: str = "postgresql+asyncpg://marginalia:marginalia@localhost:5432/marginalia"
+    postgres_pool_size: int = Field(default=10, ge=1, le=200)
+    postgres_max_overflow: int = Field(default=20, ge=0, le=500)
+    postgres_pool_timeout_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
 
     # mirror = folder-tree on disk matching the user's intent; default.
     # local  = UUID-flat object pool; faster, dedup-on, less human-friendly.
@@ -69,9 +74,12 @@ class Settings(BaseSettings):
 
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = 2.0
-    worker_batch_size: int = 10
+    worker_batch_size: int = 4
+    bulk_reprocess_page_size: int = Field(default=500, ge=10, le=5_000)
     worker_lease_seconds: int = 60
     worker_heartbeat_seconds: int = 20
+    worker_retry_base_seconds: float = Field(default=60.0, ge=0.1, le=86_400.0)
+    worker_retry_max_seconds: float = Field(default=3_600.0, ge=0.1, le=604_800.0)
 
     # Automatic active -> demoted -> archived transitions are opt-in.
     # Personal knowledge bases often prefer manual lifecycle control, while
@@ -128,6 +136,17 @@ class Settings(BaseSettings):
     llm_default_base_url: str | None = None
     llm_default_model: str = "gpt-4o-mini"
     llm_default_tps: int = Field(default=10, ge=1, le=10_000)
+    # Operator-declared model capabilities. The request dialect is inferred
+    # only from the provider family when omitted, never from a gateway URL.
+    llm_default_dialect: str | None = None
+    llm_default_context_window: int = Field(default=128_000, ge=1_024)
+    llm_default_tokenizer: str = "o200k_base"
+    llm_default_supports_vision: bool = True
+    llm_default_supports_tools: bool = True
+    llm_default_supports_temperature: bool = True
+    llm_default_token_limit_param: Literal[
+        "max_tokens", "max_completion_tokens"
+    ] = "max_tokens"
 
     # --- Per-profile overrides (chat / reflect / ingest / vision / audio) ---
     # Any field left blank inherits the corresponding `llm_default_*` value.
@@ -138,24 +157,60 @@ class Settings(BaseSettings):
     llm_chat_base_url: str | None = None
     llm_chat_model: str | None = None
     llm_chat_tps: int = Field(default=10, ge=1, le=10_000)
+    llm_chat_dialect: str | None = None
+    llm_chat_context_window: int | None = Field(default=None, ge=1_024)
+    llm_chat_tokenizer: str | None = None
+    llm_chat_supports_vision: bool | None = None
+    llm_chat_supports_tools: bool | None = None
+    llm_chat_supports_temperature: bool | None = None
+    llm_chat_token_limit_param: Literal[
+        "max_tokens", "max_completion_tokens"
+    ] | None = None
 
     llm_reflect_provider: LlmProvider | None = None
     llm_reflect_api_key: str | None = None
     llm_reflect_base_url: str | None = None
     llm_reflect_model: str | None = None
     llm_reflect_tps: int = Field(default=10, ge=1, le=10_000)
+    llm_reflect_dialect: str | None = None
+    llm_reflect_context_window: int | None = Field(default=None, ge=1_024)
+    llm_reflect_tokenizer: str | None = None
+    llm_reflect_supports_vision: bool | None = None
+    llm_reflect_supports_tools: bool | None = None
+    llm_reflect_supports_temperature: bool | None = None
+    llm_reflect_token_limit_param: Literal[
+        "max_tokens", "max_completion_tokens"
+    ] | None = None
 
     llm_ingest_provider: LlmProvider | None = None
     llm_ingest_api_key: str | None = None
     llm_ingest_base_url: str | None = None
     llm_ingest_model: str | None = None
     llm_ingest_tps: int = Field(default=10, ge=1, le=10_000)
+    llm_ingest_dialect: str | None = None
+    llm_ingest_context_window: int | None = Field(default=None, ge=1_024)
+    llm_ingest_tokenizer: str | None = None
+    llm_ingest_supports_vision: bool | None = None
+    llm_ingest_supports_tools: bool | None = None
+    llm_ingest_supports_temperature: bool | None = None
+    llm_ingest_token_limit_param: Literal[
+        "max_tokens", "max_completion_tokens"
+    ] | None = None
 
     llm_vision_provider: LlmProvider | None = None
     llm_vision_api_key: str | None = None
     llm_vision_base_url: str | None = None
     llm_vision_model: str | None = None
     llm_vision_tps: int = Field(default=10, ge=1, le=10_000)
+    llm_vision_dialect: str | None = None
+    llm_vision_context_window: int | None = Field(default=None, ge=1_024)
+    llm_vision_tokenizer: str | None = None
+    llm_vision_supports_vision: bool = True
+    llm_vision_supports_tools: bool | None = None
+    llm_vision_supports_temperature: bool | None = None
+    llm_vision_token_limit_param: Literal[
+        "max_tokens", "max_completion_tokens"
+    ] | None = None
 
     llm_audio_provider: LlmProvider | None = None  # only "openai" makes sense
     llm_audio_api_key: str | None = None
@@ -173,12 +228,22 @@ class Settings(BaseSettings):
     agent_plan_max_tokens: int = 2048
     agent_execute_max_tokens: int = 4096
     agent_execute_max_turns: int = 15
+    agent_max_parallel_tool_calls: int = Field(default=8, ge=1, le=32)
     agent_final_answer_continue_turns: int = 3
     agent_final_answer_max_chars: int = 120_000
     # Hard wall-clock cap for one foreground chat turn. 0 disables the cap.
     # This is intentionally backend-owned so desktop, web, and CLI clients
     # get the same stuck-turn recovery behavior.
     agent_turn_timeout_seconds: float = 1800.0
+    agent_cache_slo_min_hit_ratio: float = Field(default=0.95, ge=0.0, le=1.0)
+    agent_cache_slo_min_eligible_requests: int = Field(
+        default=2, ge=1, le=1_000_000,
+    )
+    # Conversation history compaction is token-aware and independent from
+    # evidence compression. It only changes the provider request view; stored
+    # turns and tool results remain lossless.
+    conversation_compaction_enabled: bool = True
+    conversation_compaction_reserve_tokens: int = Field(default=8_192, ge=1_024)
     # Unified compression switch. Only COMPRESSION_ENABLED controls all
     # built-in ingest, query, and read_files compression paths.
     compression_enabled: bool = Field(True, validation_alias="COMPRESSION_ENABLED")
@@ -189,7 +254,11 @@ class Settings(BaseSettings):
     # Bounded fan-out for ingest-time LLM work: long text/PDF chunk
     # indexing and scanned-PDF OCR page calls. Keep this conservative;
     # provider rate limits and local network bandwidth are the real cap.
-    llm_ingest_concurrency: int = 10
+    # Zero omits the output-token field for OpenAI-shaped providers and lets
+    # the provider apply its own limit. Anthropic requires a positive value
+    # and is rejected by validate_llm_config below.
+    llm_ingest_max_tokens: int = Field(default=1200, ge=0, le=16_384)
+    llm_ingest_concurrency: int = 4
 
     # --- Embeddings / semantic recall --------------------------------------
     # Uses Alibaba Cloud Model Studio (DashScope/Bailian) by default through
@@ -206,6 +275,8 @@ class Settings(BaseSettings):
     semantic_index_backend: Literal["auto", "file", "sqlite-vec"] = "auto"
     semantic_recall_enabled: bool = False
     semantic_recall_limit: int = 100
+    semantic_rebuild_page_size: int = Field(default=100, ge=1, le=1_000)
+    section_backfill_min_score: float = Field(default=0.45, ge=0.0, le=1.0)
 
     # --- Optional rerank ----------------------------------------------------
     # Rerank is a second-stage retrieval refinement over already-recalled
@@ -260,6 +331,19 @@ class Settings(BaseSettings):
 
 
 @dataclass(slots=True, frozen=True)
+class ModelCapabilities:
+    """Explicit request and context limits for one resolved model."""
+
+    dialect: str = "openai-compatible"
+    context_window: int = 128_000
+    tokenizer: str = "o200k_base"
+    supports_vision: bool = True
+    supports_tools: bool = True
+    supports_temperature: bool = True
+    token_limit_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+
+
+@dataclass(slots=True, frozen=True)
 class LlmProfile:
     name: str
     provider: LlmProvider
@@ -267,6 +351,7 @@ class LlmProfile:
     base_url: str | None
     model: str
     tps: int = 10
+    capabilities: ModelCapabilities = ModelCapabilities()
 
 
 LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
@@ -299,6 +384,7 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
     provider = _profile_field(settings, profile, "provider")  # type: ignore[assignment]
     base_url = _profile_field(settings, profile, "base_url")  # type: ignore[assignment]
     model = _profile_field(settings, profile, "model")  # type: ignore[assignment]
+    capabilities = _resolve_model_capabilities(settings, profile, str(provider or ""))
     return LlmProfile(
         name=profile,
         provider=provider,  # type: ignore[arg-type]
@@ -310,6 +396,41 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
             provider=str(provider or ""),
             base_url=base_url if isinstance(base_url, str) else None,
             model=str(model or ""),
+        ),
+        capabilities=capabilities,
+    )
+
+
+def _resolve_model_capabilities(
+    settings: Settings,
+    profile: str,
+    provider: str,
+) -> ModelCapabilities:
+    # Audio uses a different API and does not consume chat capability fields.
+    # Give it provider-shaped defaults without adding dead audio settings.
+    if profile == "audio":
+        dialect = "anthropic" if provider == "anthropic" else (
+            "openai" if provider == "openai" else "openai-compatible"
+        )
+        return ModelCapabilities(dialect=dialect)
+
+    dialect = _profile_field(settings, profile, "dialect")
+    if not dialect:
+        dialect = "anthropic" if provider == "anthropic" else (
+            "openai" if provider == "openai" else "openai-compatible"
+        )
+    tokenizer = str(_profile_field(settings, profile, "tokenizer") or "").strip()
+    return ModelCapabilities(
+        dialect=str(dialect).strip().lower(),
+        context_window=int(_profile_field(settings, profile, "context_window")),
+        tokenizer=tokenizer or "utf8_upper_bound",
+        supports_vision=bool(_profile_field(settings, profile, "supports_vision")),
+        supports_tools=bool(_profile_field(settings, profile, "supports_tools")),
+        supports_temperature=bool(
+            _profile_field(settings, profile, "supports_temperature")
+        ),
+        token_limit_param=_profile_field(  # type: ignore[arg-type]
+            settings, profile, "token_limit_param"
         ),
     )
 
@@ -419,6 +540,23 @@ def validate_llm_config(settings: Settings) -> None:
             "LLM api_key is not configured for required profile(s): "
             f"{', '.join(missing)}. Set LLM_DEFAULT_API_KEY in .env, or set "
             "the per-profile override LLM_<PROFILE>_API_KEY for each."
+        )
+    ingest_profile = resolve_profile(settings, "ingest")
+    if settings.llm_ingest_max_tokens == 0 and ingest_profile.provider == "anthropic":
+        raise LlmConfigError(
+            "LLM_INGEST_MAX_TOKENS=0 omits the provider output-token limit, "
+            "but Anthropic requires max_tokens. Configure a positive ingest "
+            "limit for Anthropic profiles."
+        )
+    if (
+        settings.document_vision_enabled
+        and has_vision_profile(settings)
+        and not settings.llm_vision_supports_vision
+    ):
+        raise LlmConfigError(
+            "Document vision is enabled, but the configured vision profile is "
+            "declared without image support. Set LLM_VISION_SUPPORTS_VISION=true "
+            "or disable DOCUMENT_VISION_ENABLED."
         )
 
 

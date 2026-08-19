@@ -13,16 +13,19 @@ directly from the DB.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.db.models import Task
 from marginalia.db.session import get_session
 from marginalia.repositories import tasks as tasks_repo
 
 router = APIRouter(tags=["tasks"])
+INGEST_TASK_KINDS: tuple[str, ...] = ("ingest_file", "reprocess_file")
 
 
 @router.get("/tasks/running-count")
@@ -126,9 +129,143 @@ async def list_recent(
             "last_error": r["last_error"],
             "duration_ms": detail.get("duration_ms"),
             "tokens_in": detail.get("tokens_in"),
+            "prompt_tokens": detail.get("prompt_tokens"),
             "tokens_out": detail.get("tokens_out"),
             "cache_read": detail.get("cache_read"),
+            "cache_creation": detail.get("cache_creation"),
             "llm_calls": detail.get("llm_calls"),
+            "stages_ms": detail.get("stages_ms") or {},
         }
 
     return {"items": [_row(r) for r in rows]}
+
+
+@router.get("/tasks/throughput")
+async def task_throughput(
+    window_minutes: int = 60,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Report ingest queue backlog and recent completion throughput."""
+    bounded_window = min(max(window_minutes, 1), 24 * 60)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=bounded_window)
+    active = (
+        await db.execute(
+            select(Task).where(
+                Task.kind == "ingest_file",
+                Task.status.in_(("pending", "running")),
+            )
+        )
+    ).scalars().all()
+    terminal = (
+        await db.execute(
+            select(Task).where(
+                Task.kind == "ingest_file",
+                Task.status.in_(("done", "dead")),
+                Task.finished_at >= since,
+            )
+        )
+    ).scalars().all()
+    return _task_throughput_payload(
+        active=list(active),
+        terminal=list(terminal),
+        now=now,
+        window_minutes=bounded_window,
+    )
+
+
+def _task_throughput_payload(
+    *,
+    active: list[Task],
+    terminal: list[Task],
+    now: datetime,
+    window_minutes: int,
+) -> dict[str, Any]:
+    by_kind: dict[str, dict[str, Any]] = {
+        kind: {
+            "kind": kind,
+            "pending": 0,
+            "running": 0,
+            "done": 0,
+            "failed": 0,
+            "oldest_pending_age_seconds": 0,
+            "average_duration_seconds": None,
+        }
+        for kind in INGEST_TASK_KINDS
+    }
+    durations: dict[str, list[float]] = {kind: [] for kind in INGEST_TASK_KINDS}
+    for task in active:
+        throughput_kind = _throughput_kind(task)
+        row = by_kind.get(throughput_kind)
+        if row is None or task.status not in {"pending", "running"}:
+            continue
+        row[task.status] += 1
+        if task.status == "pending" and task.scheduled_at is not None:
+            scheduled_at = _as_utc(task.scheduled_at)
+            row["oldest_pending_age_seconds"] = max(
+                int(row["oldest_pending_age_seconds"]),
+                max(0, int((now - scheduled_at).total_seconds())),
+            )
+    for task in terminal:
+        throughput_kind = _throughput_kind(task)
+        row = by_kind.get(throughput_kind)
+        if row is None:
+            continue
+        if task.status == "done":
+            row["done"] += 1
+        elif task.status == "dead":
+            row["failed"] += 1
+        if task.started_at is not None and task.finished_at is not None:
+            durations[throughput_kind].append(max(
+                0.0,
+                (_as_utc(task.finished_at) - _as_utc(task.started_at)).total_seconds(),
+            ))
+
+    for kind, row in by_kind.items():
+        terminal_count = int(row["done"]) + int(row["failed"])
+        row["success_rate"] = (
+            int(row["done"]) / terminal_count if terminal_count else None
+        )
+        row["completed_per_minute"] = int(row["done"]) / window_minutes
+        if durations[kind]:
+            row["average_duration_seconds"] = sum(durations[kind]) / len(durations[kind])
+
+    kind_rows = list(by_kind.values())
+    pending = sum(int(row["pending"]) for row in kind_rows)
+    running = sum(int(row["running"]) for row in kind_rows)
+    done = sum(int(row["done"]) for row in kind_rows)
+    failed = sum(int(row["failed"]) for row in kind_rows)
+    terminal_count = done + failed
+    return {
+        "window_minutes": window_minutes,
+        "since": (now - timedelta(minutes=window_minutes)).isoformat(),
+        "queue": {
+            "pending": pending,
+            "running": running,
+            "total": pending + running,
+            "oldest_pending_age_seconds": max(
+                (int(row["oldest_pending_age_seconds"]) for row in kind_rows),
+                default=0,
+            ),
+        },
+        "completed": {
+            "done": done,
+            "failed": failed,
+            "success_rate": done / terminal_count if terminal_count else None,
+            "files_per_minute": done / window_minutes,
+        },
+        "by_kind": kind_rows,
+    }
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _throughput_kind(task: Task) -> str:
+    """Split real ingest tasks into ordinary and reprocess activity."""
+    if task.kind == "reprocess_file":
+        return "reprocess_file"
+    raw_payload = getattr(task, "payload", None)
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    return "reprocess_file" if payload.get("scheduled_by") else "ingest_file"

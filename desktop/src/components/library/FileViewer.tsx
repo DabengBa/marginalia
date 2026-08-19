@@ -18,8 +18,13 @@ import {
 } from "./FileViewerViews";
 
 export interface ViewerLocator {
-  kind: "quote" | "line" | "page";
-  value: string;
+  quote?: string;
+  line?: string;
+  page?: string;
+  block?: string;
+  sheet?: string;
+  cell?: string;
+  row?: string;
 }
 
 interface Props {
@@ -93,9 +98,11 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
   const remote = meta?.webdav_remote;
   const needsHydrate = Boolean(remote && !remote.hydrated);
 
-  const lineLoc = locator?.kind === "line" ? parseLineRange(locator.value) : null;
-  const pageLoc = locator?.kind === "page" ? parseInt(locator.value, 10) : null;
-  const quoteLoc = locator?.kind === "quote" ? locator.value : null;
+  const lineLoc = locator?.line ? parseLineRange(locator.line) : null;
+  const pageLoc = locator?.page ? parseInt(locator.page, 10) : null;
+  const blockLoc = locator?.block ? parseInt(locator.block, 10) : null;
+  const rowLoc = locator?.row ? parseInt(locator.row, 10) : null;
+  const quoteLoc = locator?.quote || null;
 
   useEffect(() => {
     if (kind === "pdf" && locator && onLocatorConsumed) onLocatorConsumed();
@@ -186,6 +193,10 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
             downloadUrl={downloadUrl}
             quote={quoteLoc}
             page={Number.isFinite(pageLoc as number) ? (pageLoc as number) : null}
+            block={Number.isFinite(blockLoc as number) ? (blockLoc as number) : null}
+            sheet={locator?.sheet || null}
+            cell={locator?.cell || null}
+            row={Number.isFinite(rowLoc as number) ? (rowLoc as number) : null}
             onScrolled={onLocatorConsumed}
           />
         )}

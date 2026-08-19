@@ -21,6 +21,11 @@ import { useI18n } from "@/lib/i18n";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
+const EDITABLE_FIELDS = [
+  "provider", "model", "base_url", "api_key", "dialect", "context_window",
+  "tokenizer", "supports_vision", "supports_tools", "supports_temperature",
+  "token_limit_param",
+] as const;
 
 type FormState = Partial<Record<string, string>>;
 
@@ -41,7 +46,11 @@ export function LlmProfileEditor({ data, onChange }: Props) {
     setTestErr(null);
     try {
       const res = await settingsApi.testLlm();
-      setTestResults(res.profiles);
+      setTestResults({
+        ...res.profiles,
+        embedding: res.embedding,
+        rerank: res.rerank,
+      });
     } catch (e: unknown) {
       setTestErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -146,6 +155,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
         base_url: data.defaults.base_url,
         api_key: data.defaults.api_key,
         api_key_set: data.defaults.api_key_set,
+        capabilities: data.defaults.capabilities,
       }
     : profile!;
 
@@ -156,11 +166,22 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
   const [healed, setHealed] = useState(0);
 
   useEffect(() => {
+    const overlayValue = (suffix: string) => {
+      const value = overlay[overlayKey(suffix)];
+      return value == null ? "" : String(value);
+    };
     setForm({
-      provider: (overlay[overlayKey("provider")] as string) ?? "",
-      model: (overlay[overlayKey("model")] as string) ?? "",
-      base_url: (overlay[overlayKey("base_url")] as string) ?? "",
+      provider: overlayValue("provider"),
+      model: overlayValue("model"),
+      base_url: overlayValue("base_url"),
       api_key: "",
+      dialect: overlayValue("dialect"),
+      context_window: overlayValue("context_window"),
+      tokenizer: overlayValue("tokenizer"),
+      supports_vision: overlayValue("supports_vision"),
+      supports_tools: overlayValue("supports_tools"),
+      supports_temperature: overlayValue("supports_temperature"),
+      token_limit_param: overlayValue("token_limit_param"),
     });
     setErr(null);
     setHealed(0);
@@ -172,12 +193,19 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       (form.provider ?? "") !== (overlay[overlayKey("provider")] ?? "") ||
       (form.model ?? "") !== (overlay[overlayKey("model")] ?? "") ||
       (form.base_url ?? "") !== (overlay[overlayKey("base_url")] ?? "") ||
-      (form.api_key ?? "") !== ""
+      (form.api_key ?? "") !== "" ||
+      EDITABLE_FIELDS.filter((field) => field !== "api_key").some(
+        (field) => (form[field] ?? "") !== (
+          overlay[overlayKey(field)] == null
+            ? ""
+            : String(overlay[overlayKey(field)])
+        ),
+      )
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form, overlay, name]);
 
-  const overrideCount = ["provider", "model", "base_url", "api_key"].filter(
+  const overrideCount = EDITABLE_FIELDS.filter(
     (k) => overlay[overlayKey(k)] != null,
   ).length;
 
@@ -186,7 +214,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
     setErr(null);
     try {
       const patch: Record<string, string | null> = {};
-      for (const k of ["provider", "model", "base_url", "api_key"] as const) {
+      for (const k of EDITABLE_FIELDS) {
         const v = form[k];
         if (v === undefined) continue;
         if (k === "api_key" && v === "") continue;
@@ -214,12 +242,12 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
     setErr(null);
     try {
       const patch: Record<string, null> = {};
-      for (const k of ["provider", "model", "base_url", "api_key"] as const) {
+      for (const k of EDITABLE_FIELDS) {
         patch[overlayKey(k)] = null;
       }
       const next = await settingsApi.updateLlm(patch);
       onChange(next);
-      setForm({ provider: "", model: "", base_url: "", api_key: "" });
+      setForm(Object.fromEntries(EDITABLE_FIELDS.map((field) => [field, ""])));
       setSavedAt(Date.now());
       setHealed(0);
     } catch (e: unknown) {
@@ -318,6 +346,61 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
+          <Field label={t.llm.dialect}>
+            <input
+              value={form.dialect ?? ""}
+              onChange={(e) => setForm({ ...form, dialect: e.target.value })}
+              placeholder={view.capabilities.dialect}
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+            />
+          </Field>
+          <Field label={t.llm.contextWindow}>
+            <input
+              type="number"
+              min={1024}
+              value={form.context_window ?? ""}
+              onChange={(e) => setForm({ ...form, context_window: e.target.value })}
+              placeholder={String(view.capabilities.context_window)}
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+            />
+          </Field>
+          <Field label={t.llm.tokenizer}>
+            <input
+              value={form.tokenizer ?? ""}
+              onChange={(e) => setForm({ ...form, tokenizer: e.target.value })}
+              placeholder={view.capabilities.tokenizer}
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+            />
+          </Field>
+          <CapabilitySelect
+            label={t.llm.supportsVision}
+            value={form.supports_vision ?? ""}
+            inherited={view.capabilities.supports_vision}
+            onChange={(value) => setForm({ ...form, supports_vision: value })}
+          />
+          <CapabilitySelect
+            label={t.llm.supportsTools}
+            value={form.supports_tools ?? ""}
+            inherited={view.capabilities.supports_tools}
+            onChange={(value) => setForm({ ...form, supports_tools: value })}
+          />
+          <CapabilitySelect
+            label={t.llm.supportsTemperature}
+            value={form.supports_temperature ?? ""}
+            inherited={view.capabilities.supports_temperature}
+            onChange={(value) => setForm({ ...form, supports_temperature: value })}
+          />
+          <Field label={t.llm.tokenLimitParam}>
+            <select
+              value={form.token_limit_param ?? ""}
+              onChange={(e) => setForm({ ...form, token_limit_param: e.target.value })}
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            >
+              <option value="">{view.capabilities.token_limit_param}</option>
+              <option value="max_tokens">max_tokens</option>
+              <option value="max_completion_tokens">max_completion_tokens</option>
+            </select>
+          </Field>
           <Field label={t.llm.apiKey}>
             <input
               type="password"
@@ -383,5 +466,31 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="mb-1 block text-xs font-medium text-fg-muted">{label}</span>
       {children}
     </label>
+  );
+}
+
+function CapabilitySelect({
+  label,
+  value,
+  inherited,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  inherited: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field label={label}>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
+      >
+        <option value="">{String(inherited)}</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    </Field>
   );
 }

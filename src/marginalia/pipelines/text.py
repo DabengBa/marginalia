@@ -45,6 +45,8 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines._long_index import (
     build_retrieval_extra,
     fallback_section,
+    ingest_output_limit,
+    ingest_output_tokens,
     llm_ingest_concurrency,
     parse_index_response,
     render_sections_digest,
@@ -52,6 +54,7 @@ from marginalia.pipelines._long_index import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.tasks.usage import measure_stage
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +64,7 @@ MAX_TEXT_BYTES = 60_000
 MAX_TEXT_INDEX_BYTES = 8 * 1024 * 1024
 TEXT_CHUNK_CHARS = 50_000
 TEXT_SECTION_DIGEST_BYTES = 60_000
-TEXT_INDEX_MIN_OUTPUT_TOKENS = 8192
+TEXT_INDEX_MIN_OUTPUT_TOKENS = 1024
 TEXT_INDEX_MAX_OUTPUT_TOKENS = 16384
 
 # read_segment limits — we read more than the LLM-indexing path because the
@@ -132,14 +135,11 @@ TEXT_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 def _index_output_tokens(char_count: int) -> int:
-    return min(
-        TEXT_INDEX_MAX_OUTPUT_TOKENS,
-        max(TEXT_INDEX_MIN_OUTPUT_TOKENS, char_count // 8),
-    )
+    return ingest_output_tokens(char_count)
 
 
 def _should_retry_empty_index(resp: Any, max_tokens: int) -> bool:
-    if max_tokens >= TEXT_INDEX_MAX_OUTPUT_TOKENS:
+    if max_tokens >= ingest_output_limit():
         return False
     return not (getattr(resp, "text", None) or "").strip() or (
         getattr(resp, "stop_reason", None) == "max_tokens"
@@ -178,9 +178,10 @@ class TextPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body, indexed_bytes, read_truncated = await self._read_text_with_meta(
-            storage, ctx.storage_key, cap=MAX_TEXT_INDEX_BYTES,
-        )
+        with measure_stage("extraction"):
+            body, indexed_bytes, read_truncated = await self._read_text_with_meta(
+                storage, ctx.storage_key, cap=MAX_TEXT_INDEX_BYTES,
+            )
         if not body.strip():
             coverage = self._coverage(
                 total_bytes=ctx.size_bytes,
@@ -201,21 +202,22 @@ class TextPipeline(Pipeline):
                 entry_catalog_path=None,
                 entry_tags=[],
             )
-        if len(body) > MAX_TEXT_BYTES:
-            return await self._run_chunked_index(
+        with measure_stage("intelligence"):
+            if len(body) > MAX_TEXT_BYTES:
+                return await self._run_chunked_index(
+                    ctx=ctx,
+                    body=body,
+                    total_bytes=ctx.size_bytes,
+                    indexed_bytes=indexed_bytes,
+                    read_truncated=read_truncated,
+                )
+            return await self._run_single_index(
                 ctx=ctx,
                 body=body,
                 total_bytes=ctx.size_bytes,
                 indexed_bytes=indexed_bytes,
                 read_truncated=read_truncated,
             )
-        return await self._run_single_index(
-            ctx=ctx,
-            body=body,
-            total_bytes=ctx.size_bytes,
-            indexed_bytes=indexed_bytes,
-            read_truncated=read_truncated,
-        )
 
     async def _run_single_index(
         self,
@@ -272,7 +274,7 @@ class TextPipeline(Pipeline):
                 "output budget (%s)",
                 _response_diag(resp),
             )
-            request = replace(request, max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS)
+            request = replace(request, max_tokens=ingest_output_limit())
             resp = await client.complete(request)
             fields = parse_index_response(resp, anchor_unit="lines")
         if not fields.summary:
@@ -379,7 +381,7 @@ class TextPipeline(Pipeline):
                     )
                     retry_request = replace(
                         request,
-                        max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS,
+                        max_tokens=ingest_output_limit(),
                     )
                     resp = await client.complete(retry_request)
                     fields = parse_index_response(resp, anchor_unit="lines")
@@ -446,7 +448,7 @@ class TextPipeline(Pipeline):
                 ),
                 aggregate_content,
             ),
-            max_tokens=8192,
+            max_tokens=_index_output_tokens(len(aggregate_content)),
             temperature=0.2,
             cache_breakpoints=[0],
         )
@@ -460,7 +462,7 @@ class TextPipeline(Pipeline):
             )
             retry_request = replace(
                 request,
-                max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS,
+                max_tokens=ingest_output_limit(),
             )
             resp = await client.complete(retry_request)
             fields = parse_index_response(resp, anchor_unit="lines")

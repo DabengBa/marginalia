@@ -45,7 +45,14 @@ def _build_engine(settings: Settings) -> AsyncEngine:
 
         return engine
 
-    return create_async_engine(url, future=True, pool_pre_ping=True)
+    return create_async_engine(
+        url,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=settings.postgres_pool_size,
+        max_overflow=settings.postgres_max_overflow,
+        pool_timeout=settings.postgres_pool_timeout_seconds,
+    )
 
 
 def get_engine() -> AsyncEngine:

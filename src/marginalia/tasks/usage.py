@@ -23,8 +23,11 @@ Usage from a chat client wrapper (already done in factory.record_chat_use):
 """
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from marginalia.llm.types import TokenUsage
 
@@ -33,28 +36,41 @@ from marginalia.llm.types import TokenUsage
 class UsageCounters:
     """Running totals for one task run."""
     tokens_in: int = 0
+    prompt_tokens: int = 0
     tokens_out: int = 0
     cache_read: int = 0
     cache_creation: int = 0
     llm_calls: int = 0
     tool_calls: int = 0
+    stage_durations_ms: dict[str, int] = field(default_factory=dict)
 
     def add(self, usage: TokenUsage) -> None:
         self.tokens_in += usage.input_tokens or 0
+        self.prompt_tokens += usage.prompt_tokens or 0
         self.tokens_out += usage.output_tokens or 0
         self.cache_read += usage.cache_read_tokens or 0
         self.cache_creation += usage.cache_creation_tokens or 0
         self.llm_calls += 1
 
-    def to_detail(self, *, duration_ms: int) -> dict[str, int]:
+    def record_stage(self, name: str, duration_ms: int) -> None:
+        stage = name.strip()
+        if not stage:
+            return
+        self.stage_durations_ms[stage] = (
+            self.stage_durations_ms.get(stage, 0) + max(0, int(duration_ms))
+        )
+
+    def to_detail(self, *, duration_ms: int) -> dict[str, object]:
         return {
             "duration_ms": duration_ms,
             "tokens_in": self.tokens_in,
+            "prompt_tokens": self.prompt_tokens,
             "tokens_out": self.tokens_out,
             "cache_read": self.cache_read,
             "cache_creation": self.cache_creation,
             "llm_calls": self.llm_calls,
             "tool_calls": self.tool_calls,
+            "stages_ms": dict(self.stage_durations_ms),
         }
 
 
@@ -97,3 +113,19 @@ def record_tool_call() -> None:
     counters = _current.get()
     if counters is not None:
         counters.tool_calls += 1
+
+
+def record_stage(name: str, duration_ms: int) -> None:
+    counters = _current.get()
+    if counters is not None:
+        counters.record_stage(name, duration_ms)
+
+
+@contextmanager
+def measure_stage(name: str) -> Iterator[None]:
+    """Accumulate wall time for a named stage on the current task run."""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        record_stage(name, int((time.monotonic() - started) * 1000))

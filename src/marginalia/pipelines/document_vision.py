@@ -27,6 +27,29 @@ MAX_DOCUMENT_QUESTION_IMAGES = 5
 _DIRECT_VISION_MEDIA_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
+def prefer_source_text_for_question(
+    source: SegmentResult,
+    *,
+    mode: str,
+    question: str,
+    answered_by: str,
+) -> SegmentResult | None:
+    """Keep readable source text ahead of every on-demand vision fallback."""
+    text = str(source.text or "").strip()
+    if source.error is not None or not text:
+        return None
+    return SegmentResult(
+        text=source.text,
+        extras={
+            **dict(source.extras or {}),
+            "mode": mode,
+            "question": question,
+            "answered_by": answered_by,
+            "source_text_preserved": True,
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentImage:
     image_id: str

@@ -369,6 +369,7 @@ async def append_llm_call(
     phase: str,
     model: str,
     input_tokens: int,
+    prompt_tokens: int | None = None,
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
@@ -386,6 +387,11 @@ async def append_llm_call(
         "phase": phase,
         "model": model,
         "input_tokens": input_tokens,
+        "prompt_tokens": (
+            prompt_tokens
+            if prompt_tokens is not None
+            else input_tokens + cache_read_tokens + cache_creation_tokens
+        ),
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,

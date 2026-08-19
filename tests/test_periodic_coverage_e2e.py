@@ -24,6 +24,7 @@ import marginalia.tasks.handlers  # noqa: F401
 
 from marginalia.tasks.kinds import (
     DEFAULT_PRIORITIES,
+    KIND_DELETE_STORAGE_OBJECT,
     KIND_MINE_RELATIONS,
     KIND_PERIODIC_TICK,
     KIND_PROPOSE_VIEWS,
@@ -32,6 +33,7 @@ from marginalia.tasks.kinds import (
     KIND_REBUILD_SEMANTIC_INDEX,
     KIND_RECOVER_STUCK_TASKS,
     KIND_REFRESH_ENTRY_EXTRA,
+    KIND_REFRESH_SEMANTIC_FILE,
     KIND_RESTRUCTURE_CATALOGS,
     KIND_SUGGEST_LIFECYCLE,
     KIND_TAG_QUALITY,
@@ -64,6 +66,12 @@ EXPECTED_PERIODIC = {
 EXPECTED_NON_PERIODIC = {
     "reflect_turn",
     "ingest_file",
+    # Bulk reprocessing is an explicit user dispatcher; it pages and enqueues
+    # per-file work but never schedules itself periodically.
+    "bulk_reprocess_files",
+    # Storage deletion is created transactionally by purge; retries are driven
+    # by that durable task rather than a second periodic scan.
+    KIND_DELETE_STORAGE_OBJECT,
     # summarize_session is per-session: periodic_tick scans for eligible
     # sessions and enqueues one task per session with a session-scoped
     # dedup_key. It does NOT live in PERIODIC_INTERVALS (which only handles
@@ -72,6 +80,9 @@ EXPECTED_NON_PERIODIC = {
     # Rebuilding the semantic index is an explicit user/admin operation because
     # it can re-embed the full corpus with the currently configured model.
     KIND_REBUILD_SEMANTIC_INDEX,
+    # Deduplicated uploads enqueue a targeted refresh after creating the new
+    # entry; it is event-driven and coalesced per file.
+    KIND_REFRESH_SEMANTIC_FILE,
     # WebDAV publish is triggered from explicit sync actions, not periodic
     # background maintenance.
     KIND_WEBDAV_PUBLISH,

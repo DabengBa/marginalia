@@ -294,6 +294,19 @@ API key。默认 embedding 配置面向百炼/DashScope 的 `text-embedding-v4`;
 普通库可在 GUI/API 中排队重建默认 semantic index,用于更换 embedding 模型或
 维度后的全量重嵌入。ingest 成功后也会在 semantic recall 已配置时刷新该文件的
 semantic 向量。
+全库重建通过 `SEMANTIC_REBUILD_PAGE_SIZE` 分页读取数据库；词法候选如果缺少
+章节定位，会在 `SECTION_BACKFILL_MIN_SCORE` 阈值以上回填限定在该文件内的
+最佳语义章节，不会因此扩大候选集合。
+按内容去重的上传不会复活已经软删除的文件行。重复上传未完成或失败内容时会
+恢复 ingest；重复上传已就绪内容时会排单文件 semantic 刷新。只有 provider、
+model、维度和章节文本 hash 都与当前 embedding 配置一致时，刷新才会复用旧向量。
+
+每个 LLM profile 都可以显式声明请求方言、上下文窗口、tokenizer、图片/工具/
+temperature 能力和输出 token 参数名，设置界面也可编辑这些字段；运行时不再
+根据网关 URL 猜测方言。超过模型窗口的会话请求会按 token 压缩为结构化
+checkpoint，但数据库中的原始 turn 不变；`CONVERSATION_COMPACTION_*` 与证据
+压缩完全独立。会话指标还会按 `AGENT_CACHE_SLO_*` 阈值输出缓存 SLO 的
+`met`、`breached` 或 `insufficient_data` 三态结果。
 
 metadata 文本检索在 SQLite 和 Postgres 两种部署形态下都有索引:SQLite 使用
 FTS5 trigram 表;Postgres 使用 `to_tsvector` / `websearch_to_tsquery`
@@ -312,6 +325,8 @@ journal 召回会在读取时校验引用 entry:如果旧笔记指向已删除 e
 - `marginalia eval ablation-run` 可以输出 retrieval 组件消融矩阵,
   对比 metadata-only、relations、semantic recall、rerank 和 full recall
   的候选池指标差异。
+- `marginalia eval load-run` 可执行有界并发检索压测，输出请求速率、错误率、
+  p50/p95/p99、Hit@K 和 MRR，并可用阈值让不达标的运行返回非零退出码。
 - 300 条 retrieval,`recall_knowledge` + rerank top-80: MRR 0.7226,
   hit@10 0.8800,hit@100 0.9133。
 - 300 条 bounded answer-run,rerank top-80 + quota: evidence hit 0.8667,
@@ -392,6 +407,9 @@ STORAGE_BACKEND=mirror           # 默认。文件以可读文件夹形式存:
                                  # 高频改写场景快约 5 倍)/ 's3'
 
 WORKER_ENABLED=true              # embedded 模式默认开
+WORKER_RETRY_BASE_SECONDS=60      # 任务重试指数退避起点
+WORKER_RETRY_MAX_SECONDS=3600     # 任务重试退避上限
+MARGINALIA_UPLOAD_MAX_BYTES=0     # 单文件上传上限;0 = 不限制
 MAINTENANCE_DAILY_TOKEN_BUDGET=0 # 后台维护 24 小时滚动 token 上限;0 = 不限制
 RELATION_BACKGROUND_VETTING_ENABLED=false
 
@@ -414,10 +432,15 @@ RERANK_BASE_URL=https://dashscope.aliyuncs.com/compatible-api/v1
 RERANK_MODEL=qwen3-rerank
 EVIDENCE_SELECTION=quota         # quota / rerank
 
-AGENT_PLAN_MAX_TOKENS=1024
-AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_PLAN_MAX_TOKENS=2048
+AGENT_EXECUTE_MAX_TOKENS=4096
+AGENT_MAX_PARALLEL_TOOL_CALLS=8
 AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
 AGENT_FINAL_ANSWER_MAX_CHARS=120000
+
+LLM_INGEST_MAX_TOKENS=1200
+LLM_INGEST_CONCURRENCY=4
+LLM_VISION_SUPPORTS_VISION=true
 
 MARGINALIA_SERVER=               # 非空 = 远程模式,跳过 embedded
 ```
@@ -437,6 +460,28 @@ OpenAI 兼容 endpoint(Together / Groq / DeepSeek / 本地 vLLM / ollama)
 GUI 仍然只收到一个合并后的 `answer` 事件。可用
 `AGENT_FINAL_ANSWER_CONTINUE_TURNS` 和 `AGENT_FINAL_ANSWER_MAX_CHARS`
 调节续写轮数与最终答案字符上限。
+
+### 可靠性与恢复边界
+
+每次任务领取都会生成独立 delivery owner token。心跳、完成、重试和过期 lease
+恢复都必须同时匹配 owner 与预期 lease，因此旧 worker 在任务被其他 worker
+接管后不能再提交结果或重试；owner 丢失时，本进程中的旧 handler 也会取消。
+任务退避在 `WORKER_RETRY_BASE_SECONDS` 与 `WORKER_RETRY_MAX_SECONDS` 之间
+指数增长；periodic dispatcher 使用时间槽去重键，当前 tick 不会再吞掉自己的
+继任 tick。数据库启动升级时，会先把旧库中重复的 active dedup 任务收敛为最可
+执行的一条，再安装唯一约束，无需手工修库。
+
+`MARGINALIA_UPLOAD_MAX_BYTES` 在 multipart 数据流入时、Starlette spool 之前
+生效；文件字节精确计数，表单 metadata 另有独立上限。上传提交结果不明确时会
+执行补偿清理，本地 `.part` 会删除，失败的 S3 multipart 会 abort；物理对象删除
+由可重试的持久任务表达。PostgreSQL 部署还会用 transaction advisory lock
+串行化冲突的工具作用域，以及同一 session 的并发 turn。
+
+有意不支持的服务运行时能力仅限于必须更换数据模型的部分：组织/用户与
+ACL/RLS 多租户隔离、共享知识库 slug、持久 agent event inbox、provider attempt
+envelope 表、可重放 durable SSE operation，以及外部 job queue 数据库对账。
+本项目保留单知识库 ownership、当前请求内的 chat stream，并直接轮询自己的
+`tasks` 表；强行模拟这些服务抽象反而会破坏现有架构的不变量。
 
 ## 部署形态
 

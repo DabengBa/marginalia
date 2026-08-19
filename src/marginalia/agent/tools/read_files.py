@@ -191,21 +191,18 @@ SCHEMA: dict[str, Any] = {
                                 # container
                                 "member_path": {"type": "string"},
                                 # VLM-on-read: required for image entries.
-                                # Optional for OCR-indexed PDFs and for
-                                # DOCX/PPTX embedded images. Without it,
-                                # the pipeline reads stored extracted text;
-                                # with it, the pipeline sends scoped pixels
-                                # to the vision model.
+                                # For documents, source text remains primary;
+                                # pixels are inspected only when the requested
+                                # range has no readable text.
                                 "question": {
                                     "type": "string",
                                     "minLength": 1,
                                     "description": (
-                                        "REQUIRED for image entries. Optional "
-                                        "for OCR-indexed PDFs and DOCX/PPTX "
-                                        "embedded images: omit it to read "
-                                        "stored extracted text, or include it "
-                                        "to send scoped pixels to the vision "
-                                        "model. Combine with `page_start`/"
+                                        "REQUIRED for image entries. For PDF, "
+                                        "DOCX, and PPTX, omit it for ordinary "
+                                        "text reads; include it only when a "
+                                        "range without readable text needs "
+                                        "visual inspection. Combine with `page_start`/"
                                         "`page_end`, `slide_start`/`slide_end`, "
                                         "`paragraph_start`/`paragraph_end`, "
                                         "`image_id`, or `image_index` to scope "
@@ -239,9 +236,11 @@ SCHEMA: dict[str, Any] = {
         "PPTX `pattern` can be combined with slide_start/slide_end. "
         "Pattern hits are paginated via `match_offset` (use the "
         "`next_match_offset` from a previous response). Pass `question` "
-        "for image entries, OCR-indexed PDFs, or DOCX/PPTX embedded images. "
-        "For OCR-indexed PDFs, omit it to read stored OCR text, or pass it "
-        "to send rendered pages to the vision model for a targeted re-check. "
+        "for image entries or when a requested document range has no readable "
+        "text and needs visual inspection. Source text is always preferred "
+        "and preserved before OCR or vision. For ordinary PDF, DOCX, or PPTX "
+        "text, shapes, and tables, omit `question`; for OCR-indexed PDFs, omit "
+        "it to read stored OCR text. "
         "Use AFTER read_entries_metadata identified relevant sections."
     ),
     schema=SCHEMA,

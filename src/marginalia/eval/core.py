@@ -100,6 +100,8 @@ from marginalia.eval.retrieval import (
     default_ablation_configs,
     run_eval_ablation_dataset,
     run_eval_dataset,
+    run_load_eval_dataset,
+    run_load_eval_with_retriever,
 )
 from marginalia.eval.types import (
     BeirDocument,
@@ -147,5 +149,7 @@ __all__ = [
     "run_answer_probe",
     "run_eval_ablation_dataset",
     "run_eval_dataset",
+    "run_load_eval_dataset",
+    "run_load_eval_with_retriever",
     "run_report_compare_dataset",
 ]

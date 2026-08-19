@@ -74,7 +74,7 @@ async def main() -> int:
             r.raise_for_status()
         except Exception as e:
             print(f"  could not reach server: {e}")
-            print(f"  is uvicorn running? try: uvicorn marginalia.main:app")
+            print("  is uvicorn running? try: uvicorn marginalia.main:app")
             return 2
 
         results: list[tuple[str, dict]] = []
@@ -110,9 +110,9 @@ async def main() -> int:
         else:
             print("all samples ingested. try the CLI:")
             print(f"  marginalia --server {args.server}")
-            print(f"  marginalia> /tree")
-            print(f"  marginalia> /search consensus")
-            print(f"  marginalia> 帮我对比 Raft 和 Paxos")
+            print("  marginalia> /tree")
+            print("  marginalia> /search consensus")
+            print("  marginalia> 帮我对比 Raft 和 Paxos")
         return 0
 
 

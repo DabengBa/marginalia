@@ -73,6 +73,9 @@ services:
         condition: service_completed_successfully
     environment:
       MARGINALIA_HOME: /data
+      APP_ENV: ${APP_ENV:-dev}
+      BUILD_SHA: ${BUILD_SHA:-unknown}
+      BUILD_ID: ${BUILD_ID:-local}
       DB_BACKEND: postgres
       POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
       STORAGE_BACKEND: s3
@@ -106,6 +109,9 @@ services:
     command: ["marginalia-worker", "--log-level", "INFO"]
     environment:
       MARGINALIA_HOME: /data
+      APP_ENV: ${APP_ENV:-dev}
+      BUILD_SHA: ${BUILD_SHA:-unknown}
+      BUILD_ID: ${BUILD_ID:-local}
       DB_BACKEND: postgres
       POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
       STORAGE_BACKEND: s3
