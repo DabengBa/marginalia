@@ -190,8 +190,7 @@ async def main():
     await _create_schema()
     seeded = await _seed()
 
-    # Script: 1 plan call, 1 execute call (calls search_journal),
-    #          1 execute call (final answer, no tool calls).
+    # Script: plan, search_journal, finish_research, final answer.
     script = [
         # plan
         ChatResponse(
@@ -212,11 +211,25 @@ async def main():
             usage=TokenUsage(input_tokens=1100, output_tokens=80, cache_read_tokens=900),
             parsed_json=None,
         ),
-        # execute turn 1: model gives final answer
+        # execute turn 1: model closes evidence gathering
+        ChatResponse(
+            text=None,
+            tool_calls=[ToolCall(
+                id="call_2", name="finish_research",
+                arguments={
+                    "evidence_status": "sufficient",
+                    "reason": "Relevant journal context was found.",
+                },
+            )],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=1200, output_tokens=60, cache_read_tokens=1000),
+            parsed_json=None,
+        ),
+        # finalizing: model gives the answer
         ChatResponse(
             text=(
                 "Raft 是 leader-based 一致性算法，关键步骤是 leader 选举与 "
-                "log replication[^a]。\n\n[^a]: entry_id=" + seeded["entry_id"]
+                "log replication。"
             ),
             tool_calls=[],
             stop_reason="end_turn",
@@ -253,8 +266,8 @@ async def main():
                 if ev["event"] == "thinking"
             ]
             assert thinking_rounds[:2] == [1, 2], thinking_rounds
-            assert seq.count("tool_call") == 1
-            assert seq.count("tool_result") == 1
+            assert seq.count("tool_call") == 2
+            assert seq.count("tool_result") == 2
             assert seq.count("answer") == 1
             assert seq[-1] == "done"
 
@@ -271,8 +284,8 @@ async def main():
 
             assert done["truncated"] is False
             assert "Raft" in answer
-            assert done["llm_calls"] == 3
-            assert done["tool_calls"] == 1
+            assert done["llm_calls"] == 4
+            assert done["tool_calls"] == 2
 
     # ---- DB-level invariants ----------------------------------------------
     factory = get_session_factory()
@@ -284,26 +297,29 @@ async def main():
         assert conv.agent_response and "Raft" in conv.agent_response
         assert conv.ended_at is not None
 
-        # llm_calls JSON: 1 plan + 2 execute
+        # llm_calls JSON: 1 plan + 3 execute
         llm_calls = conv.llm_calls or []
         print("[3] conversation.llm_calls phases:",
               [c["phase"] for c in llm_calls])
-        assert len(llm_calls) == 3
+        assert len(llm_calls) == 4
         assert llm_calls[0]["phase"] == "plan"
         assert llm_calls[1]["phase"] == "execute"
         assert llm_calls[2]["phase"] == "execute"
+        assert llm_calls[3]["phase"] == "execute"
 
-        # tool_calls JSON: 1 search_journal call with results
+        # tool_calls JSON: search_journal plus the research-finalization signal
         tcs = conv.tool_calls or []
         print("[3] conversation.tool_calls:", [t["name"] for t in tcs])
-        assert len(tcs) == 1
+        assert len(tcs) == 2
         assert tcs[0]["name"] == "search_journal"
         assert tcs[0]["error"] is None
         assert tcs[0]["result"]["count"] >= 1
+        assert tcs[1]["name"] == "finish_research"
+        assert tcs[1]["error"] is None
 
         # totals match
-        assert conv.total_llm_calls == 3
-        assert conv.total_tool_calls == 1
+        assert conv.total_llm_calls == 4
+        assert conv.total_tool_calls == 2
 
         # reflect_turn task enqueued
         rt = (await s.execute(text(
@@ -330,8 +346,8 @@ async def main():
             closed = r.json()
             print("[6] closed totals:", closed["totals"])
             assert closed["totals"]["turn_count"] == 1
-            assert closed["totals"]["llm_calls"] == 3
-            assert closed["totals"]["tool_calls"] == 1
+            assert closed["totals"]["llm_calls"] == 4
+            assert closed["totals"]["tool_calls"] == 2
 
     # ---- budget-tail: nudge appears once we enter the last 1/3 -----------
     from marginalia.agent.runtime import _budget_tail

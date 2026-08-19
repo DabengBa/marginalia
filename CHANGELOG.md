@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.3.5 - 2026-08-19
+
+### Changed
+
+- Agent execution now has an explicit evidence-gathering checkpoint before
+  final composition. Once research is closed, tools are disabled and the
+  model receives up to two bounded attempts to return a complete answer.
+- Source citations selected at the checkpoint are validated against successful
+  `read_files` output. Entry IDs, exact visible quotes, and PDF page or PPTX
+  slide positions must all be supported by evidence from the current turn.
+
+### Fixed
+
+- Final answers no longer lose article-source anchors when the model emits body
+  markers without their definitions. The runtime assigns stable markers and
+  appends verified definitions deterministically before display-link rewriting.
+- Model-written definitions for assigned markers are replaced with the
+  validated manifest, and missing body markers receive a compact source
+  fallback so every verified citation remains reachable.
+
 ## 0.3.4 - 2026-08-19
 
 ### Changed

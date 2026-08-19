@@ -42,7 +42,7 @@ get_settings.cache_clear()  # type: ignore[attr-defined]
 from sqlalchemy import select
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, Conversation, Session
+from marginalia.db.models import Base, Conversation, File, FileEntry, Session
 from marginalia.llm.types import (
     ChatRequest, ChatResponse, TokenUsage, ToolCall,
 )
@@ -82,6 +82,43 @@ async def _open_session(initiating: str) -> str:
         ))
         await s.commit()
     return sid
+
+
+async def _seed_citation_entry() -> str:
+    factory = get_session_factory()
+    now = _now()
+    file_id = new_id()
+    entry_id = new_id()
+    async with factory() as s:
+        s.add(File(
+            id=file_id,
+            storage_key=f"citation/{file_id}.txt",
+            sha256=(file_id.replace("-", "") * 2)[:64],
+            size_bytes=80,
+            mime_type="text/plain",
+            original_ext=".txt",
+            kind="text",
+            summary="Evidence about medieval merchants",
+            description={"sections": []},
+            extra=None,
+            ingest_status="done",
+            ingested_at=now,
+            created_at=now,
+            updated_at=now,
+        ))
+        s.add(FileEntry(
+            id=entry_id,
+            folder_id=None,
+            file_id=file_id,
+            display_name="evidence.txt",
+            lifecycle="active",
+            catalog_id=None,
+            extra=None,
+            created_at=now,
+            updated_at=now,
+        ))
+        await s.commit()
+    return entry_id
 
 
 class _ScriptedChat:
@@ -125,7 +162,32 @@ class _CountingTool:
         return {"echo": arguments, "n": self.call_count}
 
 
-def _install_tool(tool: _CountingTool) -> None:
+class _CitingReadTool(_CountingTool):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(name="read_files")
+        self.entry_id = entry_id
+
+    async def handler(self, db, ctx, arguments):
+        self.call_count += 1
+        return {
+            "ok": True,
+            "results": [{
+                "ok": True,
+                "entry_id": self.entry_id,
+                "display_name": "evidence.txt",
+                "reads": [{
+                    "ok": True,
+                    "text": "Merchant classes expanded with organized trade routes in the eleventh century.",
+                }],
+            }],
+        }
+
+
+def _install_tool(
+    tool: _CountingTool,
+    *,
+    explicit_finalization: bool = False,
+) -> None:
     """Replace get_tool/all_tool_defs to return our scripted tool only."""
     fake_def = {
         "name": tool.name,
@@ -136,8 +198,31 @@ def _install_tool(tool: _CountingTool) -> None:
     class _Reg:
         handler = tool.handler
 
-    runtime.get_tool = lambda n: _Reg if n == tool.name else None  # type: ignore
-    runtime.all_tool_defs = lambda: [fake_def]  # type: ignore
+    finish_registration = (
+        tools_pkg.get_tool("finish_research") if explicit_finalization else None
+    )
+    finish_def = (
+        {
+            "name": finish_registration.name,
+            "description": finish_registration.description,
+            "input_schema": finish_registration.input_schema,
+        }
+        if finish_registration is not None
+        else None
+    )
+
+    def fake_get_tool(name: str):
+        if name == tool.name:
+            return _Reg
+        if finish_registration is not None and name == "finish_research":
+            return finish_registration
+        return None
+
+    runtime.get_tool = fake_get_tool  # type: ignore
+    runtime.all_tool_defs = lambda: [
+        fake_def,
+        *([finish_def] if finish_def is not None else []),
+    ]  # type: ignore
 
 
 # ---- collectors ------------------------------------------------------------
@@ -329,7 +414,7 @@ async def test_execute_repairs_premature_no_tool_answer_for_library_query() -> N
     assert len(chat.requests) == 4, len(chat.requests)
     repair_req = chat.requests[2]
     assert any(
-        "previous response ended without using Marginalia tools"
+        "research phase is still active"
         in str(message.content)
         for message in repair_req.messages
     )
@@ -520,7 +605,105 @@ async def test_final_answer_continuation_is_buffered() -> None:
     print("[4] final-answer continuation: buffered into one answer event")
 
 
-# ---- 5. canonical args (json.dumps sort_keys) ------------------------------
+# ---- 5. explicit research finalization + citation closure -----------------
+
+
+async def test_finalizing_attaches_validated_citation_manifest() -> None:
+    entry_id = await _seed_citation_entry()
+    sid = await _open_session("citation finalization")
+    tool = _CitingReadTool(entry_id)
+    _install_tool(tool, explicit_finalization=True)
+    quote = "organized trade routes in the eleventh century"
+    chat = _ScriptedChat([
+        ChatResponse(
+            text="1. Read the source and answer with citations.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=400, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[ToolCall(
+                id="read-1",
+                name="read_files",
+                arguments={"requests": [{"entry_id": entry_id}]},
+            )],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=500, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text=None,
+            tool_calls=[ToolCall(
+                id="finish-1",
+                name="finish_research",
+                arguments={
+                    "evidence_status": "sufficient",
+                    "reason": "The requested source passage was read.",
+                    "citations": [{
+                        "entry_id": entry_id,
+                        "quote": quote,
+                        "reason": "the source dates the organized trade expansion",
+                    }],
+                },
+            )],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=600, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Merchants expanded through organized trade.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=700, output_tokens=40),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    events = await _drive(sid, "When did organized merchant trade expand?")
+    answers = [data for event, data in events if event == "answer"]
+    assert len(answers) == 1, answers
+    assert f"[evidence.txt](entry:{entry_id}?q=organized+trade+routes" in answers[0]
+    assert "entry_id=" not in answers[0]
+    assert tool.call_count == 1
+
+    thinking = [
+        json.loads(data)
+        for event, data in events
+        if event == "thinking"
+    ]
+    assert [item["answer_phase"] for item in thinking] == [
+        "researching",
+        "researching",
+        "finalizing",
+    ]
+    assert chat.requests[3].tool_choice == "none"
+    assert any(
+        "citation_manifest markers" in str(message.content)
+        for message in chat.requests[3].messages
+    )
+
+    done = json.loads(next(data for event, data in events if event == "done"))
+    assert done["llm_calls"] == 4
+    assert done["tool_calls"] == 2
+    assert done["truncated"] is False
+    factory = get_session_factory()
+    async with factory() as s:
+        conv = await s.get(Conversation, done["conversation_id"])
+        assert conv is not None
+        assert conv.agent_response is not None
+        assert f"entry_id={entry_id}" in conv.agent_response
+        assert [call["name"] for call in conv.tool_calls] == [
+            "read_files",
+            "finish_research",
+        ]
+        manifest = conv.tool_calls[1]["result"]["citation_manifest"]
+        assert manifest[0]["entry_id"] == entry_id
+        assert manifest[0]["quote"] == quote
+    print("[5] finalizing attached validated citation definitions before display")
+
+
+# ---- 6. canonical args (json.dumps sort_keys) ------------------------------
 
 def test_canonical_args() -> None:
     a = runtime._canonical_args({"a": 1, "b": 2})
@@ -560,6 +743,7 @@ async def main() -> None:
     await test_tool_dedup()
     await test_doom_loop_nudge()
     await test_final_answer_continuation_is_buffered()
+    await test_finalizing_attaches_validated_citation_manifest()
     print("\nALL RUNTIME-GUARD TESTS PASSED")
 
 

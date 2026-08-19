@@ -112,6 +112,7 @@ def registered_tools() -> list[str]:
 # Order doesn't matter; the LLM picks among them by name.
 def _bootstrap() -> None:
     from marginalia.agent.tools import analyze_container  # noqa: F401
+    from marginalia.agent.tools import finish_research  # noqa: F401
     from marginalia.agent.tools import generate_chart  # noqa: F401
     from marginalia.agent.tools import list_catalogs  # noqa: F401
     from marginalia.agent.tools import list_folder  # noqa: F401

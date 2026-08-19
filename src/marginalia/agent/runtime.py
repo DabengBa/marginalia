@@ -53,13 +53,17 @@ import time
 import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal, Mapping, Sequence
 
 from marginalia.agent.compression_adapter import maybe_compress_tool_result_for_model
 from marginalia.agent.cache_metrics import summarize_llm_calls
 from marginalia.agent.conversation_compaction import (
     TokenCounter,
     fit_messages_to_token_budget,
+)
+from marginalia.agent.citation_manifest import (
+    attach_citation_manifest,
+    prepare_finish_citation_manifest,
 )
 from marginalia.agent.stable_context import (
     build_plan_history_messages,
@@ -119,6 +123,7 @@ QUICK_EXECUTE_MAX_TURNS = 4
 STANDARD_EXECUTE_MAX_TURNS = 8
 AUTO_MAX_BUDGET_UPGRADES = 2
 QUICK_FORCED_ANSWER_RETRIES = 1
+MAX_FINALIZATION_ATTEMPTS = 2
 # Structured-truncation safety net: how many trim passes before falling
 # back to string slicing. Practically each pass halves one large list, so
 # 3 passes can absorb three different oversize lists in one payload.
@@ -135,6 +140,7 @@ BUDGET_PREFIX = "BUDGET:"
 SESSION_NAME_PREFIX = "Session name:"
 MAX_SESSION_NAME_LEN = 80
 BudgetTier = Literal["quick", "standard", "deep"]
+AnswerPhase = Literal["researching", "finalizing"]
 BUDGET_TIERS: tuple[BudgetTier, ...] = ("quick", "standard", "deep")
 
 # Doom-loop: if the same (name, canonical_args) shows up
@@ -166,12 +172,33 @@ QUICK_FORCED_ANSWER_NUDGE = (
     "question unless they explicitly asked otherwise."
 )
 PREMATURE_NO_TOOL_NUDGE = (
-    "[runtime guard] Your previous response ended without using Marginalia "
-    "tools, but the user's request appears to ask about local files, notes, "
-    "documents, or knowledge-base contents. Do not answer from memory. Use "
-    "Marginalia retrieval/read tools first, then answer from the collected "
-    "evidence. If no relevant local evidence exists after searching, say that "
-    "clearly."
+    "[runtime guard] The research phase is still active, so a text-only response "
+    "cannot complete this turn. If evidence is still missing, call the appropriate "
+    "retrieval or read tool now. If evidence is sufficient, or targeted checks "
+    "established that it is unavailable, call `finish_research` now. Do not "
+    "describe a future tool call in text."
+)
+FINALIZE_RESEARCH_NUDGE = (
+    "[research complete] Evidence gathering is closed. Write the complete final "
+    "Markdown answer to the user's latest original question now, using only the "
+    "evidence already collected. Do not call tools or describe future work. "
+    "If finish_research returned a citation_manifest, place its assigned markers "
+    "after the corresponding supported claims and do not recreate their footnote "
+    "definitions; the runtime appends them deterministically. If no manifest was "
+    "returned, follow the ordinary citation contract. Return the entire answer body."
+)
+FINALIZATION_RETRY_NUDGE = (
+    "[runtime guard] The previous finalizing response was not a valid complete "
+    "answer: {issue}. Return the entire corrected Markdown answer now. Do not "
+    "call tools or omit supported claims."
+)
+
+_FUTURE_ACTION_RE = re.compile(
+    r"(?:^|[.!?]\s+)(?:let me|i(?:'ll| will)|i need to)\s+"
+    r"(?:read|search|look|inspect|check|open|fetch|retrieve|query|call|use)\b"
+    r"|(?:让我|我来|接下来我?(?:会|将|要))"
+    r"(?:读取|搜索|查找|查看|检查|打开|获取|检索|查询|调用|使用)",
+    re.IGNORECASE,
 )
 
 _KB_TOOL_HINT_RE = re.compile(
@@ -481,6 +508,9 @@ class _ExecuteOutcome:
 class _DispatchStats:
     """One execute round's useful-work summary for auto-budget routing."""
     successful_new_results: int = 0
+    finish_research_requested: bool = False
+    evidence_status: str | None = None
+    citation_manifest: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -1197,12 +1227,23 @@ def _plan_event_payload(plan_text: str, budget: _BudgetState) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _execute_system_prompt_with_budget(system_prompt: str, *, limit: int) -> str:
+def _execute_system_prompt_with_budget(
+    system_prompt: str,
+    *,
+    limit: int,
+    explicit_finalization: bool = False,
+) -> str:
+    ending = (
+        "then call `finish_research`. The next response will compose the complete "
+        "final answer with citations."
+        if explicit_finalization
+        else "then answer."
+    )
     return (
         system_prompt
         + "\n\nRuntime budget: this turn has about "
         f"{limit} execute rounds available. Use tools only until enough "
-        "source evidence is collected, then answer."
+        f"source evidence is collected, {ending}"
     )
 
 
@@ -1271,6 +1312,24 @@ def _empty_execute_error() -> str:
         "Agent execution failed after planning: the model returned no answer "
         "and no tool calls. Please retry; if it repeats, inspect the provider "
         "response and session resume context."
+    )
+
+
+def _looks_like_future_action(text: str) -> bool:
+    """Catch narrow action promises that cannot complete finalizing."""
+    return bool(_FUTURE_ACTION_RE.search(text.strip()))
+
+
+def _finalization_error(user_message: str) -> str:
+    if _prefers_zh(user_message):
+        return (
+            "这次调查已完成取证，但模型未能生成可用的最终答案。"
+            "请重试；如果问题持续出现，请检查该会话的模型响应记录。"
+        )
+    return (
+        "The investigation completed its evidence phase, but the model did not "
+        "produce a usable final answer. Please retry; if this repeats, inspect "
+        "the model response records for this conversation."
     )
 
 
@@ -2020,6 +2079,14 @@ async def _run_execute_phase(
     capabilities = getattr(chat, "capabilities", None)
     tools_supported = capabilities is None or bool(capabilities.supports_tools)
     tool_defs = all_tool_defs() if tools_supported else []
+    explicit_finalization = any(
+        getattr(tool_def, "name", None) == "finish_research"
+        or (
+            isinstance(tool_def, dict)
+            and tool_def.get("name") == "finish_research"
+        )
+        for tool_def in tool_defs
+    )
     ctx = ToolContext(
         session_id=session_id,
         conversation_id=conversation_id,
@@ -2050,7 +2117,7 @@ async def _run_execute_phase(
     max_final_chars = max(0, settings.agent_final_answer_max_chars)
     max_total_turns = hard_execute_turns + max_final_continuations + (
         QUICK_FORCED_ANSWER_RETRIES if quick_mode else 0
-    )
+    ) + (MAX_FINALIZATION_ATTEMPTS if explicit_finalization else 0)
 
     last_text: str | None = None
     final_parts: list[str] = []
@@ -2061,18 +2128,74 @@ async def _run_execute_phase(
     budget_upgrade_notice: dict[str, Any] | None = None
     tool_calls_seen = False
     no_tool_repair_used = False
+    answer_phase: AnswerPhase = (
+        "researching" if explicit_finalization else "finalizing"
+    )
+    finalization_attempts = 0
+    finalization_prompt_added = False
+    citation_manifest: list[dict[str, Any]] = []
     prefix_tracker = PromptPrefixTracker()
     execute_system_prompt = _execute_system_prompt_with_budget(
         system_prompt,
         limit=hard_execute_turns,
+        explicit_finalization=explicit_finalization,
     )
+
+    def enter_finalizing(
+        *,
+        manifest: list[dict[str, Any]] | None = None,
+    ) -> None:
+        nonlocal answer_phase, finalization_prompt_added
+        nonlocal citation_manifest
+        answer_phase = "finalizing"
+        if manifest is not None:
+            citation_manifest = list(manifest)
+        if not finalization_prompt_added:
+            messages.append(ChatMessage(role="user", content=FINALIZE_RESEARCH_NUDGE))
+            finalization_prompt_added = True
+
+    def finalizing_issue(answer: str) -> str | None:
+        if _looks_like_future_action(answer):
+            return "the response describes future work instead of answering the user"
+        return None
+
+    def request_finalization_retry(
+        issue: str,
+        *,
+        response_text: str | None = None,
+    ) -> bool:
+        nonlocal continuing_final_answer, final_continuations, last_text
+        if finalization_attempts >= MAX_FINALIZATION_ATTEMPTS:
+            return False
+        if response_text:
+            messages.append(ChatMessage(role="assistant", content=response_text))
+        messages.append(ChatMessage(
+            role="user",
+            content=FINALIZATION_RETRY_NUDGE.format(issue=issue),
+        ))
+        continuing_final_answer = False
+        final_continuations = 0
+        final_parts.clear()
+        last_text = None
+        return True
 
     for turn in range(max_total_turns):
         max_execute_turns = budget_state.limit
         if (
+            explicit_finalization
+            and answer_phase == "researching"
+            and turn >= max_execute_turns - 1
+        ):
+            enter_finalizing()
+        if (
             turn >= max_execute_turns
             and not continuing_final_answer
             and not quick_forced_answer_active
+            and not (
+                explicit_finalization
+                and answer_phase == "finalizing"
+                and finalization_attempts < MAX_FINALIZATION_ATTEMPTS
+            )
         ):
             break
         auto_budget_final_round = (
@@ -2081,12 +2204,13 @@ async def _run_execute_phase(
             and turn >= max_execute_turns - 1
         )
         force_final_answer = (
-            (
-                quick_mode
-                or auto_budget_final_round
+            (explicit_finalization and answer_phase == "finalizing")
+            or (
+                not explicit_finalization
+                and (quick_mode or auto_budget_final_round)
+                and not continuing_final_answer
+                and (turn >= max_execute_turns - 1 or quick_forced_answer_active)
             )
-            and not continuing_final_answer
-            and (turn >= max_execute_turns - 1 or quick_forced_answer_active)
         )
 
         budget_tail = (
@@ -2132,6 +2256,14 @@ async def _run_execute_phase(
             "budget_upgrades": budget_state.upgrades,
             "force_final_answer": force_final_answer,
             "forced_answer_retry": quick_forced_answer_active,
+            "answer_phase": answer_phase,
+            "finalization_attempt": (
+                finalization_attempts + 1
+                if explicit_finalization
+                and answer_phase == "finalizing"
+                and not continuing_final_answer
+                else None
+            ),
         }
         if budget_upgrade_notice is not None:
             thinking_payload["budget_upgraded"] = True
@@ -2143,6 +2275,13 @@ async def _run_execute_phase(
             event_type="thinking",
             data=json.dumps(thinking_payload, ensure_ascii=False),
         )
+
+        if (
+            explicit_finalization
+            and answer_phase == "finalizing"
+            and not continuing_final_answer
+        ):
+            finalization_attempts += 1
 
         started = time.monotonic()
         resp = await chat.complete(ChatRequest(
@@ -2193,6 +2332,12 @@ async def _run_execute_phase(
                     if continuing_final_answer else None,
                     "tools_disabled": tools_disabled,
                     "tools_supported": tools_supported,
+                    "answer_phase": answer_phase,
+                    "finalization_attempt": (
+                        finalization_attempts
+                        if explicit_finalization and answer_phase == "finalizing"
+                        else None
+                    ),
                     **compaction_metrics,
                     **prompt_observation.payload(),
                 },
@@ -2205,6 +2350,14 @@ async def _run_execute_phase(
                 conversation_id,
                 options.mode,
             )
+            if explicit_finalization and answer_phase == "finalizing":
+                issue = "the finalizing response attempted to call a tool"
+                if request_finalization_retry(issue, response_text=resp.text):
+                    continue
+                outcome.error = _finalization_error(user_message)
+                outcome.answer = outcome.error
+                yield AgentEvent(event_type="error", data=outcome.error)
+                return
             if resp.text:
                 answer = _strip_leaked_no_plan(resp.text)
                 outcome.answer = answer
@@ -2254,6 +2407,11 @@ async def _run_execute_phase(
                 yield ev
             messages.append(ChatMessage(role="tool", content=tool_result_blocks))
             last_text = resp.text or last_text
+            if dispatch_stats.finish_research_requested:
+                enter_finalizing(
+                    manifest=dispatch_stats.citation_manifest,
+                )
+                continue
             if turn + 1 >= max_execute_turns - 1:
                 upgraded, previous_limit = _try_upgrade_budget(
                     budget_state,
@@ -2272,6 +2430,14 @@ async def _run_execute_phase(
                     }
             continue
 
+        if explicit_finalization and answer_phase == "researching":
+            if resp.text:
+                messages.append(ChatMessage(role="assistant", content=resp.text))
+            messages.append(ChatMessage(role="user", content=PREMATURE_NO_TOOL_NUDGE))
+            no_tool_repair_used = True
+            last_text = None
+            continue
+
         if resp.text:
             last_text = resp.text
         if continuing_final_answer or final_parts:
@@ -2288,6 +2454,17 @@ async def _run_execute_phase(
                     conversation_id,
                     max_final_chars,
                 )
+                if explicit_finalization:
+                    issue = (
+                        "the answer exceeded the final character limit; return "
+                        "a shorter complete answer body"
+                    )
+                    if request_finalization_retry(issue, response_text=resp.text):
+                        continue
+                    outcome.error = _finalization_error(user_message)
+                    outcome.answer = outcome.error
+                    yield AgentEvent(event_type="error", data=outcome.error)
+                    return
                 outcome.truncated = True
                 outcome.answer = answer
                 yield AgentEvent(
@@ -2296,6 +2473,19 @@ async def _run_execute_phase(
                 )
                 return
             if resp.stop_reason in ("end_turn", "stop_sequence"):
+                if explicit_finalization:
+                    issue = finalizing_issue(answer)
+                    if issue:
+                        if request_finalization_retry(
+                            issue,
+                            response_text=resp.text,
+                        ):
+                            continue
+                        outcome.error = _finalization_error(user_message)
+                        outcome.answer = outcome.error
+                        yield AgentEvent(event_type="error", data=outcome.error)
+                        return
+                    answer = attach_citation_manifest(answer, citation_manifest)
                 outcome.answer = answer
                 yield AgentEvent(
                     event_type="answer",
@@ -2309,6 +2499,20 @@ async def _run_execute_phase(
                         conversation_id,
                         max_final_continuations,
                     )
+                    if explicit_finalization:
+                        issue = (
+                            "the final answer remained truncated after its "
+                            "continuation limit"
+                        )
+                        if request_finalization_retry(
+                            issue,
+                            response_text=resp.text,
+                        ):
+                            continue
+                        outcome.error = _finalization_error(user_message)
+                        outcome.answer = outcome.error
+                        yield AgentEvent(event_type="error", data=outcome.error)
+                        return
                     outcome.truncated = True
                     outcome.answer = answer
                     yield AgentEvent(
@@ -2331,6 +2535,11 @@ async def _run_execute_phase(
                 conversation_id,
                 resp.stop_reason,
             )
+            if explicit_finalization:
+                outcome.error = _finalization_error(user_message)
+                outcome.answer = outcome.error
+                yield AgentEvent(event_type="error", data=outcome.error)
+                return
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
@@ -2341,6 +2550,14 @@ async def _run_execute_phase(
         if resp.stop_reason in ("end_turn", "stop_sequence"):
             raw_answer = resp.text or last_text or ""
             if not raw_answer.strip():
+                if explicit_finalization:
+                    issue = "the finalizing response was empty"
+                    if request_finalization_retry(issue):
+                        continue
+                    outcome.error = _finalization_error(user_message)
+                    outcome.answer = outcome.error
+                    yield AgentEvent(event_type="error", data=outcome.error)
+                    return
                 outcome.error = _empty_execute_error()
                 outcome.answer = outcome.error
                 log.error(
@@ -2365,6 +2582,19 @@ async def _run_execute_phase(
                 ))
                 continue
             answer = _strip_leaked_no_plan(raw_answer)
+            if explicit_finalization:
+                issue = finalizing_issue(answer)
+                if issue:
+                    if request_finalization_retry(
+                        issue,
+                        response_text=resp.text,
+                    ):
+                        continue
+                    outcome.error = _finalization_error(user_message)
+                    outcome.answer = outcome.error
+                    yield AgentEvent(event_type="error", data=outcome.error)
+                    return
+                answer = attach_citation_manifest(answer, citation_manifest)
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
@@ -2390,6 +2620,17 @@ async def _run_execute_phase(
                         "conversation %s hit max_tokens with continuation disabled",
                         conversation_id,
                     )
+                if explicit_finalization:
+                    issue = (
+                        "the final answer was truncated; return a shorter complete "
+                        "answer body"
+                    )
+                    if request_finalization_retry(issue, response_text=resp.text):
+                        continue
+                    outcome.error = _finalization_error(user_message)
+                    outcome.answer = outcome.error
+                    yield AgentEvent(event_type="error", data=outcome.error)
+                    return
                 outcome.truncated = True
                 outcome.answer = answer
                 yield AgentEvent(
@@ -2413,6 +2654,11 @@ async def _run_execute_phase(
         # burn the whole round budget on duplicate filtered/refused outputs.
         # Surface what we have and stop instead of looping.
         surfaced = _strip_leaked_no_plan(resp.text or last_text or "")
+        if explicit_finalization:
+            outcome.error = _finalization_error(user_message)
+            outcome.answer = outcome.error
+            yield AgentEvent(event_type="error", data=outcome.error)
+            return
         if surfaced.strip():
             outcome.truncated = True
             outcome.answer = surfaced
@@ -2433,6 +2679,11 @@ async def _run_execute_phase(
 
     log.warning("conversation %s hit agent_execute_max_turns=%d", conversation_id,
                 max_execute_turns)
+    if explicit_finalization and answer_phase == "finalizing":
+        outcome.error = _finalization_error(user_message)
+        outcome.answer = outcome.error
+        yield AgentEvent(event_type="error", data=outcome.error)
+        return
     fallback = _strip_leaked_no_plan(
         last_text or _turn_budget_fallback(user_message)
     )
@@ -2521,6 +2772,58 @@ async def _persist_tool_call(
         await db.commit()
 
 
+async def _load_prior_tool_calls(
+    conversation_id: str,
+) -> list[Mapping[str, Any]]:
+    """Load completed calls before the current assistant tool-call batch."""
+    async with session_scope() as db:
+        conversation = await db.get(ConversationRow, conversation_id)
+        if conversation is None:
+            raise ValueError(f"conversation {conversation_id} missing")
+        return [
+            call
+            for call in list(conversation.tool_calls or [])
+            if isinstance(call, Mapping)
+        ]
+
+
+def _persisted_tool_call_failed(call: Mapping[str, Any]) -> bool:
+    if call.get("error"):
+        return True
+    result = call.get("result")
+    return isinstance(result, Mapping) and (
+        result.get("ok") is False or bool(result.get("error"))
+    )
+
+
+def _finish_research_preflight(
+    tool_call: Any,
+    prior_tool_calls: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if tool_call.name != "finish_research":
+        return None
+    if str(tool_call.arguments.get("evidence_status") or "") != "sufficient":
+        return None
+    latest_read = next(
+        (
+            call
+            for call in reversed(prior_tool_calls)
+            if str(call.get("name") or "") == "read_files"
+        ),
+        None,
+    )
+    if latest_read is None or not _persisted_tool_call_failed(latest_read):
+        return None
+    return {
+        "error": (
+            "finish_research(sufficient) was rejected because the latest "
+            "read_files call failed; resolve or replace that read before finishing"
+        ),
+        "retryable": True,
+        "guard": "unresolved_read_failure",
+    }
+
+
 async def _dispatch_tool_calls(
     *,
     tool_calls,
@@ -2557,10 +2860,17 @@ async def _dispatch_tool_calls(
     n = len(tool_calls)
     placeholders: list[ToolResultBlock | None] = [None] * n
     keys: list[str] = []
-    statuses: list[str] = []  # runnable | dup_prior | dup_batch | unknown
+    statuses: list[str] = []  # runnable | duplicate | unknown | preflight_error
     leader_followers: dict[int, list[int]] = {}
     seen_in_batch: dict[str, int] = {}
     nudge_pending = False
+    prior_tool_calls = (
+        await _load_prior_tool_calls(conversation_id)
+        if any(tc.name == "finish_research" for tc in tool_calls)
+        else []
+    )
+    finish_manifests: dict[int, list[dict[str, Any]]] = {}
+    preflight_errors: dict[int, dict[str, Any]] = {}
 
     # ---- preflight: classify in source order, yield tool_call events ----
     for idx, tc in enumerate(tool_calls):
@@ -2645,15 +2955,29 @@ async def _dispatch_tool_calls(
         key = guard.key(tc.name, tc.arguments)
         keys.append(key)
 
+        preflight_error = _finish_research_preflight(tc, prior_tool_calls)
+        finish_manifest: list[dict[str, Any]] = []
+        if preflight_error is None:
+            finish_manifest, preflight_error = prepare_finish_citation_manifest(
+                tc,
+                prior_tool_calls,
+            )
+        if tc.name == "finish_research":
+            finish_manifests[idx] = finish_manifest
+        if preflight_error is not None:
+            preflight_errors[idx] = preflight_error
+            statuses.append("preflight_error")
+            continue
+
         if guard.should_nudge(key):
             nudge_pending = True
             guard.nudged = True
 
-        if guard.is_duplicate(key):
+        if tc.name != "finish_research" and guard.is_duplicate(key):
             statuses.append("dup_prior")
             guard.recent.append(key)
             continue
-        if key in seen_in_batch:
+        if tc.name != "finish_research" and key in seen_in_batch:
             statuses.append("dup_batch")
             leader_followers.setdefault(seen_in_batch[key], []).append(idx)
             guard.recent.append(key)
@@ -2671,6 +2995,11 @@ async def _dispatch_tool_calls(
         if s == "dup_prior":
             prior = guard.seen[key]
             prior_preview = guard.seen_previews.get(key) or "(see prior call)"
+            if stats is not None and tc.name == "finish_research":
+                stats.finish_research_requested = True
+                stats.evidence_status = str(
+                    tc.arguments.get("evidence_status") or ""
+                ) or None
             placeholders[idx] = ToolResultBlock(
                 tool_call_id=tc.id,
                 content=(
@@ -2704,6 +3033,34 @@ async def _dispatch_tool_calls(
                 data=json.dumps({
                     "tool_call_id": tc.id,
                     "name": tc.name, "ok": False, "error": err,
+                }, ensure_ascii=False),
+            )
+        elif s == "preflight_error":
+            result = preflight_errors[idx]
+            err = str(result.get("error") or "finish_research preflight failed")
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=tc.name,
+                arguments=tc.arguments,
+                result=result,
+                error=err,
+                duration_ms=0,
+            )
+            result_text = json.dumps(result, ensure_ascii=False)
+            placeholders[idx] = ToolResultBlock(
+                tool_call_id=tc.id,
+                content=result_text,
+                is_error=True,
+            )
+            guard.remember(key, result_text, preview=err)
+            yield AgentEvent(
+                event_type="tool_result",
+                data=json.dumps({
+                    "tool_call_id": tc.id,
+                    "name": tc.name,
+                    "ok": False,
+                    "error": err,
+                    "guard": result.get("guard"),
                 }, ensure_ascii=False),
             )
 
@@ -2807,6 +3164,18 @@ async def _dispatch_tool_calls(
                         )
                     continue
 
+                if tc.name == "finish_research" and isinstance(result, dict):
+                    manifest = finish_manifests.get(idx, [])
+                    result = dict(result)
+                    if manifest:
+                        result["citation_manifest"] = manifest
+                        result["next"] = (
+                            "Write the final answer now without calling more tools. "
+                            "Use the citation_manifest markers in the body; the "
+                            "validated footnote definitions will be appended "
+                            "deterministically."
+                        )
+
                 # Side-channel: tools may attach `__user_only__` payload
                 # shown to the UI but kept OUT of the model's tool_result
                 # content. We persist the full result on the conversation
@@ -2819,6 +3188,29 @@ async def _dispatch_tool_calls(
                     }
                 else:
                     result_for_model_source = result
+                result_ok = not (
+                    isinstance(result, dict)
+                    and (result.get("ok") is False or result.get("error"))
+                )
+                if (
+                    stats is not None
+                    and tc.name == "finish_research"
+                    and result_ok
+                ):
+                    stats.finish_research_requested = True
+                    stats.evidence_status = str(
+                        tc.arguments.get("evidence_status") or ""
+                    ) or None
+                    raw_manifest = result_for_model_source.get("citation_manifest")
+                    stats.citation_manifest = (
+                        [
+                            dict(item)
+                            for item in raw_manifest
+                            if isinstance(item, Mapping)
+                        ]
+                        if isinstance(raw_manifest, list)
+                        else []
+                    )
                 compressed_for_model = maybe_compress_tool_result_for_model(
                     tc.name,
                     result_for_model_source,
@@ -2862,7 +3254,7 @@ async def _dispatch_tool_calls(
                     tool_call_id=tc.id, content=result_text,
                 )
                 guard.remember(key, result_text, preview=preview)
-                if stats is not None:
+                if stats is not None and tc.name != "finish_research":
                     stats.successful_new_results += 1
                 yield AgentEvent(
                     event_type="tool_result",

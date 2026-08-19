@@ -41,7 +41,7 @@ from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import Base, Conversation, Session, Task
 from marginalia.db.models.task_outcomes import TaskOutcome
 from marginalia.llm.types import (
-    ChatRequest, ChatResponse, TokenUsage, ToolUseBlock, ToolResultBlock,
+    ChatRequest, ChatResponse, TokenUsage, ToolCall, ToolUseBlock, ToolResultBlock,
 )
 from marginalia.main import app
 from marginalia.utils.ids import new_id
@@ -129,6 +129,23 @@ def _install_chat(client) -> None:
     runtime.get_chat_client = lambda profile="chat": client  # type: ignore
 
 
+def _finish_response(call_id: str = "finish-research") -> ChatResponse:
+    return ChatResponse(
+        text=None,
+        tool_calls=[ToolCall(
+            id=call_id,
+            name="finish_research",
+            arguments={
+                "evidence_status": "sufficient",
+                "reason": "Existing conversation context is sufficient.",
+            },
+        )],
+        stop_reason="tool_use",
+        usage=TokenUsage(input_tokens=500, output_tokens=20),
+        parsed_json=None,
+    )
+
+
 async def _drive(session_id: str, user_message: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     async for ev in runtime.run_turn(
@@ -171,7 +188,8 @@ async def test_resume_replays_history() -> None:
             usage=TokenUsage(input_tokens=400, output_tokens=20),
             parsed_json=None,
         ),
-        # execute 0: final answer (no tool_calls)
+        _finish_response(),
+        # finalizing: final answer (no tool_calls)
         ChatResponse(
             text="基于前两轮已有信息：raft 的核心是 leader election。",
             tool_calls=[], stop_reason="end_turn",
@@ -302,6 +320,7 @@ async def test_fresh_session_no_resume_prefix() -> None:
             usage=TokenUsage(input_tokens=400, output_tokens=20),
             parsed_json=None,
         ),
+        _finish_response(),
         ChatResponse(
             text="hello.",
             tool_calls=[], stop_reason="end_turn",
@@ -348,6 +367,7 @@ async def test_closed_session_reopens_for_next_turn() -> None:
             usage=TokenUsage(input_tokens=100, output_tokens=10),
             parsed_json=None,
         ),
+        _finish_response(),
         ChatResponse(
             text="continued answer",
             tool_calls=[],
@@ -430,6 +450,14 @@ async def test_empty_execute_response_surfaces_error() -> None:
             usage=TokenUsage(input_tokens=400, output_tokens=20),
             parsed_json=None,
         ),
+        _finish_response(),
+        ChatResponse(
+            text="",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=900, output_tokens=0),
+            parsed_json=None,
+        ),
         ChatResponse(
             text="",
             tool_calls=[],
@@ -444,7 +472,7 @@ async def test_empty_execute_response_surfaces_error() -> None:
     errors = [data for event_type, data in events if event_type == "error"]
     answers = [data for event_type, data in events if event_type == "answer"]
     assert errors, events
-    assert "returned no answer and no tool calls" in errors[-1]
+    assert "did not produce a usable final answer" in errors[-1]
     assert answers == []
 
     factory = get_session_factory()
