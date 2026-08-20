@@ -362,6 +362,26 @@ async def main():
         ])
         assert new_relation_count <= 2
 
+    # ---- 9. Read and candidate bounds ------------------------------------
+    await handle_mine_session_cooccurrence({
+        "activity_limit": 1,
+        "candidate_limit": 1,
+        "min_cooccurrences": 1,
+    })
+    async with factory() as s:
+        detail = (await s.execute(text(
+            "SELECT detail FROM task_outcomes "
+            "WHERE task_kind='mine_session_cooccurrence' "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1"
+        ))).scalar_one()
+        if isinstance(detail, str):
+            import json as _j
+            detail = _j.loads(detail)
+        assert detail["journals_scanned"] == 1
+        assert detail["scan_truncated"] is True
+        assert detail["candidate_pairs"] <= 1
+        assert detail["candidate_pairs_truncated"] is True
+
     print("\nALL MINE_SESSION_COOCCURRENCE E2E CHECKS PASSED")
 
 

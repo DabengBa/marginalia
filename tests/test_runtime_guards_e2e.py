@@ -593,8 +593,8 @@ async def test_final_answer_continuation_is_buffered() -> None:
     assert done["llm_calls"] == 3, done
     assert len(chat.requests) == 3, len(chat.requests)
     assert chat.requests[2].tools == chat.requests[1].tools
-    assert chat.requests[2].tool_choice == "none"
-    assert chat.requests[2].tool_choice == "none"
+    assert chat.requests[2].tool_choice == "auto"
+    assert chat.requests[2].tool_choice == "auto"
 
     factory = get_session_factory()
     async with factory() as s:
@@ -677,7 +677,7 @@ async def test_finalizing_attaches_validated_citation_manifest() -> None:
         "researching",
         "finalizing",
     ]
-    assert chat.requests[3].tool_choice == "none"
+    assert chat.requests[3].tool_choice == "auto"
     assert any(
         "citation_manifest markers" in str(message.content)
         for message in chat.requests[3].messages

@@ -225,11 +225,13 @@ async def test_server_snapshot_no_secrets() -> None:
             body = r.json()
             assert body["storage_backend"] == "local"
             assert body["worker_enabled"] is False
+            assert body["runtime_schema_bootstrap_enabled"] is True
             assert body["auto_lifecycle_enabled"] is False
             assert body["maintenance_daily_token_budget"] >= 0
             assert body["relation_background_vetting_enabled"] is False
             assert body["default_on_conflict"] in ("rename", "error", "skip")
             assert body["worker_batch_size"] >= 1
+            assert body["task_retention_days"] >= 0
             assert body["llm_ingest_concurrency"] >= 1
             assert body["llm_default_tps"] >= 1
             assert body["agent_turn_timeout_seconds"] >= 0

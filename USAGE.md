@@ -96,7 +96,7 @@ Embedded mode:
 marginalia
 ```
 
-This starts FastAPI, TaskRunner, and the CLI in one process. Database schema bootstrap runs automatically on startup.
+This starts FastAPI, TaskRunner, and the CLI in one process. Database schema bootstrap runs automatically on startup. Managed deployments may run `marginalia-db-prepare` before rollout and set `RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=false` on every API and worker replica.
 
 Remote server mode:
 
@@ -142,6 +142,11 @@ The desktop chat composer has a per-turn **Quick / Deep** switch. Quick keeps
 the plan phase but caps execute to at most two evidence-gathering passes
 followed by a forced answer on the third execute call, which is useful for
 lookup-style questions. Deep is the default full investigation loop.
+
+If a network connection drops, desktop and CLI clients resume the same turn
+from the last durable SSE cursor; the background investigation keeps running.
+Stopping a turn is explicit and records a terminal event, so reopening the
+conversation never leaves an ambiguous spinner.
 
 Export:
 
@@ -434,11 +439,20 @@ Automatic lifecycle transitions are off by default:
 AUTO_LIFECYCLE_ENABLED=false
 MAINTENANCE_DAILY_TOKEN_BUDGET=0
 RELATION_BACKGROUND_VETTING_ENABLED=false
+WORKER_SCHEDULER_ENABLED=true
+RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=true
 ```
 
 This is deliberate for personal libraries. Shared deployments can enable
 automatic lifecycle changes, cap background LLM maintenance tokens, or opt into
 periodic relation pre-vetting.
+
+Queue-only workers can set `WORKER_SCHEDULER_ENABLED=false`. Optional shared
+deployment gates (`LIBRARY_DOCUMENT_LIMIT`, `LIBRARY_STORAGE_BYTES_LIMIT`,
+`INGEST_BACKLOG_LIMIT`, and `CHAT_CONCURRENCY_LIMIT`) default to zero, meaning
+unlimited. A configured gate rejects new work with HTTP 429 and `Retry-After`.
+After a managed Alembic migration, set `RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=false`
+on both API and worker replicas to keep startup free of schema DDL.
 
 ## 12. Troubleshooting
 

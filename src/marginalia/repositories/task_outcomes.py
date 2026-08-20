@@ -120,15 +120,25 @@ async def oldest_completed_at(db: AsyncSession) -> datetime | None:
     ).scalar_one_or_none()
 
 
-async def delete_before(db: AsyncSession, cutoff: datetime) -> int:
+async def delete_before(
+    db: AsyncSession, cutoff: datetime, *, limit: int | None = None,
+) -> int:
     """Delete every outcome row strictly older than `cutoff`. Returns row
     count. Used by the prune handler — this is the only legal delete path
     on this table."""
-    return (
-        await db.execute(
-            delete(TaskOutcome).where(TaskOutcome.completed_at < cutoff)
-        )
-    ).rowcount or 0
+    if limit is None:
+        statement = delete(TaskOutcome).where(TaskOutcome.completed_at < cutoff)
+    else:
+        ids = list((await db.execute(
+            select(TaskOutcome.id)
+            .where(TaskOutcome.completed_at < cutoff)
+            .order_by(TaskOutcome.completed_at.asc(), TaskOutcome.id.asc())
+            .limit(max(1, int(limit)))
+        )).scalars().all())
+        if not ids:
+            return 0
+        statement = delete(TaskOutcome).where(TaskOutcome.id.in_(ids))
+    return (await db.execute(statement)).rowcount or 0
 
 
 async def find_one_by_key(
@@ -169,3 +179,26 @@ async def latest_completed_at_for(
             )
         )
     ).scalar_one_or_none()
+
+
+async def latest_detail_for(
+    db: AsyncSession,
+    *,
+    task_kind: str,
+    object_kind: str,
+    object_id: str,
+) -> dict[str, Any]:
+    """Detail from the newest matching outcome, or an empty mapping."""
+    detail = (
+        await db.execute(
+            select(TaskOutcome.detail)
+            .where(
+                TaskOutcome.task_kind == task_kind,
+                TaskOutcome.object_kind == object_kind,
+                TaskOutcome.object_id == object_id,
+            )
+            .order_by(TaskOutcome.completed_at.desc(), TaskOutcome.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return dict(detail) if isinstance(detail, dict) else {}

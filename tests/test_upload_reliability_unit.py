@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from marginalia.api import routes_upload
+from marginalia.capacity import CapacityExceeded
+from marginalia.config import Settings
 from marginalia.db.bootstrap import bootstrap_schema_sync
 from marginalia.db.models import File
 from marginalia.db.models.tasks import Task
@@ -351,6 +353,100 @@ async def test_deduplicated_upload_schedules_required_follow_up(
         assert task.status == "pending"
         assert stored is not None
         assert stored.ingest_status == ("pending" if ingest_status == "failed" else "done")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_upload_capacity_rejects_and_removes_written_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, factory = await _upload_db(tmp_path, "capacity.db")
+    storage = LocalStorage(tmp_path / "capacity-objects")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "marginalia.services.upload.get_settings",
+        lambda: Settings(library_document_limit=1),
+    )
+    try:
+        async with factory() as session:
+            session.add(File(
+                id=new_id(),
+                storage_key="existing/object",
+                sha256=hashlib.sha256(b"existing").hexdigest(),
+                size_bytes=8,
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            with pytest.raises(CapacityExceeded):
+                await upload(
+                    session,
+                    storage,
+                    stream=_chunks(b"new body"),
+                    fallback_name="new.txt",
+                    remote_path="/new.txt",
+                    content_type="text/plain",
+                )
+            await session.rollback()
+
+        async with factory() as session:
+            assert len((await session.execute(select(File))).scalars().all()) == 1
+        assert not any(path.is_file() for path in (tmp_path / "capacity-objects").rglob("*"))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deduplicated_upload_does_not_consume_document_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, factory = await _upload_db(tmp_path, "dedup-capacity.db")
+    storage = LocalStorage(tmp_path / "dedup-capacity-objects")
+    now = datetime.now(timezone.utc)
+    body = b"same body"
+    file_id = new_id()
+    monkeypatch.setattr(
+        "marginalia.services.upload.get_settings",
+        lambda: Settings(library_document_limit=1),
+    )
+    try:
+        async with factory() as session:
+            session.add(File(
+                id=file_id,
+                storage_key="existing/object",
+                sha256=hashlib.sha256(body).hexdigest(),
+                size_bytes=len(body),
+                kind="text",
+                summary="ready",
+                description={"sections": []},
+                ingest_status="done",
+                ingested_at=now,
+                deleted_at=None,
+                created_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            result = await upload(
+                session,
+                storage,
+                stream=_chunks(body),
+                fallback_name="copy.txt",
+                remote_path="/copy.txt",
+                content_type="text/plain",
+            )
+            await session.commit()
+        assert result.deduped is True
+        assert result.file_id == file_id
     finally:
         await engine.dispose()
 

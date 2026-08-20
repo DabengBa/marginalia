@@ -61,6 +61,25 @@ services:
       "
     restart: "no"
 
+  # One migration owner runs all DDL before API/worker replicas start.
+  db-prepare:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: marginalia:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["marginalia-db-prepare"]
+    environment:
+      MARGINALIA_HOME: /data
+      DB_BACKEND: postgres
+      POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
+      RUNTIME_SCHEMA_BOOTSTRAP_ENABLED: "false"
+    volumes:
+      - margdata:/data
+    restart: "no"
+
   api:
     build:
       context: .
@@ -69,6 +88,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-prepare:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     environment:
@@ -78,6 +99,8 @@ services:
       BUILD_ID: ${BUILD_ID:-local}
       DB_BACKEND: postgres
       POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
+      POSTGRES_PREPARED_STATEMENT_CACHE_SIZE: ${POSTGRES_PREPARED_STATEMENT_CACHE_SIZE:-100}
+      RUNTIME_SCHEMA_BOOTSTRAP_ENABLED: "false"
       STORAGE_BACKEND: s3
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET: marginalia
@@ -96,7 +119,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -114,6 +137,8 @@ services:
       BUILD_ID: ${BUILD_ID:-local}
       DB_BACKEND: postgres
       POSTGRES_DSN: postgresql+asyncpg://marginalia:marginalia@postgres:5432/marginalia
+      POSTGRES_PREPARED_STATEMENT_CACHE_SIZE: ${POSTGRES_PREPARED_STATEMENT_CACHE_SIZE:-100}
+      RUNTIME_SCHEMA_BOOTSTRAP_ENABLED: "false"
       STORAGE_BACKEND: s3
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET: marginalia

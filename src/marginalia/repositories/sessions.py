@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Conversation, Session
@@ -161,17 +161,27 @@ async def list_for_session(
 
 
 async def list_sessions(
-    db: AsyncSession, *, limit: int = 50, offset: int = 0,
+    db: AsyncSession,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    before: tuple[datetime, str] | None = None,
 ) -> list[Session]:
     """Sessions ordered most-recent-first, for the chat sidebar.
     Soft-deleted rows are hidden."""
+    statement = select(Session).where(Session.deleted_at.is_(None))
+    if before is not None:
+        timestamp, row_id = before
+        statement = statement.where(or_(
+            Session.started_at < timestamp,
+            and_(Session.started_at == timestamp, Session.id < row_id),
+        ))
     rows = (
         await db.execute(
-            select(Session)
-            .where(Session.deleted_at.is_(None))
-            .order_by(Session.started_at.desc())
+            statement
+            .order_by(Session.started_at.desc(), Session.id.desc())
             .limit(limit)
-            .offset(offset)
+            .offset(0 if before is not None else offset)
         )
     ).scalars().all()
     return list(rows)
@@ -417,6 +427,9 @@ async def append_tool_call(
     result: Mapping[str, Any] | None,
     error: str | None = None,
     duration_ms: int = 0,
+    tool_call_id: str | None = None,
+    tool_index: int | None = None,
+    turn: int | None = None,
 ) -> None:
     """Append one tool call record to conversation.tool_calls and bump totals."""
     conv = await db.get(Conversation, conversation_id)
@@ -430,6 +443,12 @@ async def append_tool_call(
         "duration_ms": duration_ms,
         "at": _utcnow().isoformat(),
     }
+    if tool_call_id is not None:
+        record["tool_call_id"] = tool_call_id
+    if tool_index is not None:
+        record["tool_index"] = int(tool_index)
+    if turn is not None:
+        record["turn"] = int(turn)
     conv.tool_calls = list(conv.tool_calls or []) + [record]
     conv.total_tool_calls = (conv.total_tool_calls or 0) + 1
     conv.total_duration_ms = (conv.total_duration_ms or 0) + duration_ms

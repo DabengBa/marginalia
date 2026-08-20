@@ -20,8 +20,10 @@ Notes:
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import math
 import re
 from typing import Any, AsyncIterator
 
@@ -73,6 +75,10 @@ _DSML_PARAM_RE = re.compile(
 )
 _ATTR_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))"
+)
+_JSON_CODE_FENCE_RE = re.compile(
+    r"\A\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*\Z",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -267,12 +273,23 @@ class OpenAIChatClient(ChatClient):
 
         tool_calls: list[ToolCall] = []
         for tc in (msg.tool_calls or []):
-            try:
-                args = json.loads(tc.function.arguments or "")
-            except json.JSONDecodeError:
-                log.warning("OpenAI returned non-JSON tool arguments: %r", tc.function.arguments)
-                args = {"_raw": tc.function.arguments}
-            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+            args, parse_error, repair_strategy = _parse_tool_arguments(
+                tc.function.arguments
+            )
+            if repair_strategy is not None:
+                log.warning(
+                    "repaired malformed JSON tool arguments for %s using %s",
+                    tc.function.name,
+                    repair_strategy,
+                )
+            if not isinstance(args, dict):
+                args = {"value": args}
+            tool_calls.append(ToolCall(
+                id=tc.id,
+                name=tc.function.name,
+                arguments=args,
+                parse_error=parse_error,
+            ))
 
         text = msg.content
         # Text-mode DSML tool calls are a DeepSeek/thinking-type provider quirk.
@@ -338,6 +355,140 @@ class OpenAIChatClient(ChatClient):
             parsed_json=parsed_json,
             raw_provider_response=resp,
         )
+
+
+def _parse_tool_arguments(raw: str | None) -> tuple[Any, str | None, str | None]:
+    """Parse tool arguments with bounded, semantics-safe repair."""
+    source = raw or "{}"
+    try:
+        return json.loads(source), None, None
+    except json.JSONDecodeError as exc:
+        original_error = str(exc)
+
+    base_candidates: list[tuple[str, str]] = [(source, "")]
+    fenced = _strip_json_code_fence(source)
+    if fenced != source:
+        base_candidates.append((fenced, "code_fence"))
+
+    attempted_json: set[str] = {source}
+    repair_candidates: list[tuple[str, str]] = []
+    for candidate, base_strategy in base_candidates:
+        variants = [(candidate, base_strategy)]
+        without_trailing_commas = _strip_trailing_json_commas(candidate)
+        if without_trailing_commas != candidate:
+            strategy = "+".join(filter(None, (base_strategy, "trailing_comma")))
+            variants.append((without_trailing_commas, strategy))
+        for normalized, strategy in variants:
+            repair_candidates.append((normalized, strategy))
+            if strategy and normalized not in attempted_json:
+                attempted_json.add(normalized)
+                try:
+                    return json.loads(normalized), None, strategy
+                except json.JSONDecodeError:
+                    pass
+
+            balanced = _close_unterminated_json_containers(normalized)
+            if balanced is not None and balanced not in attempted_json:
+                attempted_json.add(balanced)
+                balanced_strategy = "+".join(
+                    filter(None, (strategy, "closing_delimiter"))
+                )
+                repair_candidates.append((balanced, balanced_strategy))
+                try:
+                    return json.loads(balanced), None, balanced_strategy
+                except json.JSONDecodeError:
+                    pass
+
+    attempted_literals: set[str] = set()
+    for candidate, strategy in repair_candidates:
+        if candidate in attempted_literals:
+            continue
+        attempted_literals.add(candidate)
+        try:
+            value = ast.literal_eval(candidate)
+        except (SyntaxError, ValueError):
+            continue
+        if _is_json_value(value):
+            literal_strategy = "+".join(filter(None, (strategy, "python_literal")))
+            return value, None, literal_strategy
+
+    return {}, f"invalid JSON in tool arguments: {original_error}", None
+
+
+def _strip_json_code_fence(value: str) -> str:
+    match = _JSON_CODE_FENCE_RE.fullmatch(value)
+    return match.group("body").strip() if match is not None else value
+
+
+def _strip_trailing_json_commas(value: str) -> str:
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    length = len(value)
+    for index, char in enumerate(value):
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            continue
+        if char == ",":
+            next_index = index + 1
+            while next_index < length and value[next_index].isspace():
+                next_index += 1
+            if next_index < length and value[next_index] in "}]":
+                continue
+        output.append(char)
+    return "".join(output)
+
+
+def _close_unterminated_json_containers(value: str) -> str | None:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if not stack or stack.pop() != expected:
+                return None
+    if in_string or not stack or value.rstrip().endswith((":", ",")):
+        return None
+    closers = "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+    return value.rstrip() + closers
+
+
+def _is_json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_json_value(item)
+            for key, item in value.items()
+        )
+    return False
 
 
 def _extract_dsml_tool_calls(text: str) -> tuple[list[ToolCall], str]:

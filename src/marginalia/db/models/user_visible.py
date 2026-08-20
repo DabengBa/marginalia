@@ -100,6 +100,7 @@ class File(Base, IdMixin, TimestampMixin):
         Index("ix_files_kind", "kind"),
         Index("ix_files_live_created", "deleted_at", "created_at"),
         Index("ix_files_live_ingested", "deleted_at", "ingested_at"),
+        Index("ix_files_capacity_active", "deleted_at", "size_bytes"),
         CheckConstraint(_in_clause("ingest_status", INGEST_STATUSES), name="ingest_status"),
         CheckConstraint(
             f"kind IS NULL OR {_in_clause('kind', FILE_KINDS)}",

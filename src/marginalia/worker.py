@@ -40,6 +40,10 @@ def _setup_logging(level: str) -> None:
 
 async def _arun(settings: Settings) -> int:
     await bootstrap_schema()
+    if settings.runtime_schema_bootstrap_enabled:
+        log.info("database schema bootstrap complete")
+    else:
+        log.info("runtime schema bootstrap disabled; using migrated schema")
     runner = TaskRunner(settings=settings)
     await runner.start()
     log.info(

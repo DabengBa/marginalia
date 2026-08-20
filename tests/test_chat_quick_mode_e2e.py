@@ -48,6 +48,7 @@ async def _consume_sse(client, path: str, *, json_body: dict) -> list[dict]:
     async with client.stream("POST", path, json=json_body) as resp:
         assert resp.status_code == 200, await resp.aread()
         event_type = "message"
+        event_id = None
         data_lines: list[str] = []
         async for line in resp.aiter_lines():
             if line == "":
@@ -55,11 +56,46 @@ async def _consume_sse(client, path: str, *, json_body: dict) -> list[dict]:
                     events.append({
                         "event": event_type,
                         "data": "\n".join(data_lines),
+                        "id": event_id,
                     })
                 event_type = "message"
+                event_id = None
                 data_lines = []
             elif line.startswith("event:"):
                 event_type = line[6:].strip()
+            elif line.startswith("id:"):
+                event_id = int(line[3:].strip())
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+    return events
+
+
+async def _consume_resume(client, conversation_id: str, after: int) -> list[dict]:
+    events: list[dict] = []
+    async with client.stream(
+        "GET",
+        f"/v1/conversations/{conversation_id}/events",
+        params={"after_cursor": after},
+    ) as resp:
+        assert resp.status_code == 200, await resp.aread()
+        event_type = "message"
+        event_id = None
+        data_lines: list[str] = []
+        async for line in resp.aiter_lines():
+            if line == "":
+                if data_lines or event_type != "message":
+                    events.append({
+                        "event": event_type,
+                        "data": "\n".join(data_lines),
+                        "id": event_id,
+                    })
+                event_type = "message"
+                event_id = None
+                data_lines = []
+            elif line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("id:"):
+                event_id = int(line[3:].strip())
             elif line.startswith("data:"):
                 data_lines.append(line[5:].lstrip())
     return events
@@ -179,6 +215,7 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
     transport = ASGITransport(app=app)
     list_body = None
     messages_body = None
+    resumed_events = None
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
             created = await c.post(
@@ -199,6 +236,10 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
             messages = await c.get(f"/v1/sessions/{session_id}/messages")
             assert messages.status_code == 200, messages.text
             messages_body = messages.json()
+            conversation_id = next(
+                event["data"] for event in events if event["event"] == "conversation"
+            )
+            resumed_events = await _consume_resume(c, conversation_id, after=3)
 
     seq = [event["event"] for event in events]
     assert seq.count("thinking") == 4, seq
@@ -206,6 +247,13 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
     assert seq.count("tool_result") == 3, seq
     assert seq.count("answer") == 1, seq
     assert tool.call_count == 3
+    cursors = [event["id"] for event in events]
+    assert cursors == list(range(1, len(events) + 1))
+    assert resumed_events
+    assert [event["id"] for event in resumed_events] == cursors[3:]
+    assert [event["data"] for event in resumed_events] == [
+        event["data"] for event in events[3:]
+    ]
 
     thinking = [
         json.loads(event["data"])
@@ -224,7 +272,7 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
     assert chat.requests[3].tools is not None
     assert chat.requests[3].tool_choice == "auto"
     assert chat.requests[4].tools == chat.requests[3].tools
-    assert chat.requests[4].tool_choice == "none"
+    assert chat.requests[4].tool_choice == "auto"
     assert "Quick mode final execute round" in chat.requests[4].messages[-1].content
 
     done = json.loads(next(event["data"] for event in events if event["event"] == "done"))
@@ -331,9 +379,9 @@ async def test_quick_mode_repairs_tool_call_on_final_answer_round() -> None:
 
     assert len(chat.requests) == 6
     assert chat.requests[4].tools == chat.requests[3].tools
-    assert chat.requests[4].tool_choice == "none"
+    assert chat.requests[4].tool_choice == "auto"
     assert chat.requests[5].tools == chat.requests[4].tools
-    assert chat.requests[5].tool_choice == "none"
+    assert chat.requests[5].tool_choice == "auto"
     assert any(
         "previous response attempted a tool call" in str(message.content)
         for message in chat.requests[5].messages

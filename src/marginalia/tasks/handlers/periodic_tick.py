@@ -89,6 +89,22 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     settings = get_settings()
 
+    # A tick might have been queued before an operator disabled scheduling.
+    # Finish it as a no-op without fan-out or self-rescheduling; ordinary task
+    # processing remains enabled in the worker.
+    if not settings.worker_scheduler_enabled:
+        async with session_scope() as session:
+            await record_outcome(
+                session,
+                task_kind=KIND_PERIODIC_TICK,
+                object_kind=GLOBAL_OBJECT_KIND,
+                object_id=GLOBAL_OBJECT_ID,
+                outcome="noop",
+                detail={"scheduler_disabled": True},
+            )
+            await session.commit()
+        return
+
     async with session_scope() as session:
         dispatched: list[str] = []
         skipped_recent: list[str] = []
@@ -355,8 +371,12 @@ async def bootstrap_periodic_tick() -> None:
     so the user just sets a key in Settings and restarts.
     """
     from marginalia.config import LlmConfigError, get_settings, validate_llm_config
+    settings = get_settings()
+    if not settings.worker_scheduler_enabled:
+        log.info("bootstrap_periodic_tick skipped: scheduler disabled")
+        return
     try:
-        validate_llm_config(get_settings())
+        validate_llm_config(settings)
     except LlmConfigError as e:
         log.warning("bootstrap_periodic_tick skipped: %s", e)
         return

@@ -51,6 +51,7 @@ dependencies = [
 marginalia = "marginalia.cli.repl:main"
 marginalia-worker = "marginalia.worker:main"
 marginalia-mcp = "marginalia.mcp_server:main"
+marginalia-db-prepare = "marginalia.db.cli:main"
 
 [project.optional-dependencies]
 semantic = [

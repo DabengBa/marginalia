@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 import sqlalchemy as sa
 
+from marginalia.config import get_settings
 from marginalia.db.engine import get_engine
 from marginalia.db.fts import ENTRY_METADATA_FTS_TABLE, ENTRY_METADATA_FTS_TRIGGERS
 from marginalia.db.models import Base  # noqa: F401  (registers all tables)
@@ -188,6 +189,45 @@ QUERY_PERFORMANCE_INDEXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
 )
 
+SCALE_SAFETY_INDEXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "ix_files_capacity_active",
+        "files",
+        ("deleted_at", "size_bytes"),
+    ),
+    (
+        "ix_conversations_active_started",
+        "conversations",
+        ("ended_at", "started_at"),
+    ),
+    (
+        "ix_sessions_deleted_started_id",
+        "sessions",
+        ("deleted_at", "started_at", "id"),
+    ),
+    (
+        "ix_tasks_status_finished_id",
+        "tasks",
+        ("status", "finished_at", "id"),
+    ),
+    (
+        "ix_audit_events_occurred_id",
+        "audit_events",
+        ("occurred_at", "id"),
+    ),
+    (
+        "ix_task_outcomes_completed_id",
+        "task_outcomes",
+        ("completed_at", "id"),
+    ),
+    (
+        "ix_agent_events_created_id",
+        "agent_events",
+        ("created_at", "id"),
+    ),
+)
+
+
 def _apply_additive_columns(bind) -> None:
     inspector = sa.inspect(bind)
     existing_tables = set(inspector.get_table_names())
@@ -219,6 +259,20 @@ def _ensure_query_performance_indexes(bind) -> None:
         if table_name not in existing_tables:
             continue
         column_sql = ", ".join(_quote_ident(c) for c in columns)
+        bind.execute(sa.text(
+            f"CREATE INDEX IF NOT EXISTS {_quote_ident(index_name)} "
+            f"ON {_quote_ident(table_name)} ({column_sql})"
+        ))
+
+
+def _ensure_scale_safety_indexes(bind) -> None:
+    """Install indexes for keyset pagination and bounded retention scans."""
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    for index_name, table_name, columns in SCALE_SAFETY_INDEXES:
+        if table_name not in existing_tables:
+            continue
+        column_sql = ", ".join(_quote_ident(column) for column in columns)
         bind.execute(sa.text(
             f"CREATE INDEX IF NOT EXISTS {_quote_ident(index_name)} "
             f"ON {_quote_ident(table_name)} ({column_sql})"
@@ -953,6 +1007,11 @@ def bootstrap_baseline_sync(bind) -> None:
     )
 
 
+def _ensure_agent_events(bind) -> None:
+    """Create the durable public chat-event ledger on existing databases."""
+    Base.metadata.tables["agent_events"].create(bind=bind, checkfirst=True)
+
+
 # Ordered list of post-baseline shims. Each entry: (alembic-revision-id,
 # helper). Adding a new shim means: append to this list, drop a
 # corresponding `000X_*.py` revision in alembic/versions/ that calls the
@@ -972,6 +1031,8 @@ POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
     ("0012_journal_invalidation", _ensure_journal_invalidation),
     ("0013_reconcile_dead_ingest_files", _reconcile_dead_ingest_files),
     ("0014_files_kind_check", _relax_files_kind_check),
+    ("0015_agent_events", _ensure_agent_events),
+    ("0016_scale_safety_indexes", _ensure_scale_safety_indexes),
 )
 
 ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]
@@ -1012,8 +1073,15 @@ def bootstrap_schema_sync(bind) -> None:
     _stamp_alembic_version(bind, ALEMBIC_HEAD_REVISION)
 
 
-async def bootstrap_schema() -> None:
-    """Run schema creation + inbox seed against the configured async engine."""
+async def bootstrap_schema(*, force: bool = False) -> None:
+    """Run schema creation + inbox seed against the configured async engine.
+
+    Managed deployments can turn startup DDL off after applying Alembic
+    migrations. ``force`` remains available to explicit preparation commands
+    without changing the safe default for API and worker replicas.
+    """
+    if not force and not get_settings().runtime_schema_bootstrap_enabled:
+        return
     engine = get_engine()
     if engine.sync_engine.dialect.name == "sqlite":
         # SQLite PRAGMA foreign_keys cannot be toggled once a write

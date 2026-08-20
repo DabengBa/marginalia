@@ -32,6 +32,10 @@ class S3Storage(StorageBackend):
     def _client(self):  # type: ignore[no-untyped-def]
         return self._session.client("s3", endpoint_url=self._endpoint_url)
 
+    async def check_ready(self) -> None:
+        async with self._client() as s3:
+            await s3.head_bucket(Bucket=self.bucket)
+
     async def put(
         self,
         key: str,

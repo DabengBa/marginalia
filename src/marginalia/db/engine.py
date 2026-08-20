@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -45,6 +46,17 @@ def _build_engine(settings: Settings) -> AsyncEngine:
 
         return engine
 
+    connect_args: dict[str, Any] = {}
+    cache_size = settings.postgres_prepared_statement_cache_size
+    if cache_size != 100:
+        connect_args["prepared_statement_cache_size"] = cache_size
+    if cache_size == 0:
+        # Disabling asyncpg's client cache does not disable server-side
+        # prepares. Unique names avoid collisions when transaction pooling
+        # assigns a different backend connection to the next transaction.
+        connect_args["prepared_statement_name_func"] = (
+            lambda: f"__asyncpg_{uuid4()}__"
+        )
     return create_async_engine(
         url,
         future=True,
@@ -52,6 +64,7 @@ def _build_engine(settings: Settings) -> AsyncEngine:
         pool_size=settings.postgres_pool_size,
         max_overflow=settings.postgres_max_overflow,
         pool_timeout=settings.postgres_pool_timeout_seconds,
+        connect_args=connect_args,
     )
 
 

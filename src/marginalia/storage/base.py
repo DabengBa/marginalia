@@ -39,6 +39,10 @@ class StorageBackend(Protocol):
 
     async def exists(self, key: str) -> bool: ...
 
+    async def check_ready(self) -> None:
+        """Verify that the configured storage is reachable without mutation."""
+        ...
+
     async def rename(self, old_key: str, new_key: str) -> str:
         """Rename / move an object. Returns the final new key (which
         may differ from `new_key` if the backend resolves collisions).

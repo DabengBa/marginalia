@@ -524,7 +524,13 @@ prune
 periodic_tick
 ```
 
-`periodic_tick` dispatches recurring maintenance. Event-driven tasks such as `ingest_file` and `reflect_turn` are queued immediately after upload or completed chat turns.
+`periodic_tick` dispatches recurring maintenance. Event-driven tasks such as `ingest_file` and `reflect_turn` are queued immediately after upload or completed chat turns. A worker with `WORKER_SCHEDULER_ENABLED=false` excludes `periodic_tick` from claims while continuing to process every ordinary queued task.
+
+Growing maintenance paths are bounded before they allocate large intermediate
+sets: tag relation mining advances through live entries by a durable keyset
+cursor, activity miners cap recent rows, and candidate/tag sets have explicit
+limits. Retention deletion is batched and capped per run. Stable document
+sections have a configurable embedding cap; zero leaves only document vectors.
 
 LLM-dependent task kinds fail fast when required profile credentials are missing.
 
@@ -661,9 +667,30 @@ CLI or desktop
 ```
 
 Remote API deployments can set `MARGINALIA_API_TOKEN`; when present, all
-routes except `/health` and CORS preflight require `Authorization: Bearer`.
+routes except `/health`, `/live`, `/ready`, and CORS preflight require
+`Authorization: Bearer`.
 Docker compose starts API, worker, Postgres, and MinIO, and binds published
 ports to `127.0.0.1` by default.
+
+Foreground chat runs independently from the attached HTTP stream. Every public
+event is stored with a monotonic per-conversation cursor before SSE delivery;
+reconnects resume after that cursor without changing event payloads. Provider
+tool-call identifiers stay internal, while public turn/tool-index identifiers
+are stable across live delivery and transcript replay. Explicit cancellation
+is separate from viewer disconnect.
+
+Shared deployments may enable global document, byte, ingest-backlog, and chat
+concurrency gates. Zero disables a gate. PostgreSQL serializes each gate's
+check-and-create window with transaction advisory locks. Transaction-pooled
+PostgreSQL proxies disable asyncpg's prepared-statement cache and use unique
+statement names. `/live` is dependency-free; `/ready` checks database and
+storage concurrently under a bounded timeout.
+Retention work is bounded by rows per batch and batches per run; it covers
+audit records, terminal task deliveries, task outcomes, and durable chat
+events without touching live queue work.
+Runtime schema bootstrap remains enabled for zero-setup local installs. A
+managed rollout applies Alembic first and disables it on API and worker
+replicas, preventing concurrent startup DDL.
 
 ## 13. Release Pipeline
 

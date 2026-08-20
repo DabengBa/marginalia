@@ -12,6 +12,7 @@ endpoint is the only exception.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ class ChatEvent:
 
     event_type: str
     data: str
+    event_cursor: int | None = None
 
 
 class MarginaliaClient:
@@ -158,37 +160,77 @@ class MarginaliaClient:
         single string with `\\n` joins (sse-starlette will only emit
         single-line data for our payloads, but we handle both).
         """
-        async with self._http.stream(
-            "POST",
-            f"/v1/chat/{session_id}",
-            json={"query": query, "mode": mode},
-            timeout=None,
-        ) as r:
-            if r.status_code >= 400:
-                body = await r.aread()
-                raise CliHttpError(
-                    r.status_code, body.decode("utf-8", "replace")
-                )
-            event_type = "message"
-            data_lines: list[str] = []
-            async for line in r.aiter_lines():
-                if line == "":
-                    if data_lines or event_type != "message":
-                        yield ChatEvent(
-                            event_type=event_type, data="\n".join(data_lines)
+        conversation_id: str | None = None
+        cursor = 0
+        terminal = False
+        method = "POST"
+        url = f"/v1/chat/{session_id}"
+        request_kwargs: dict[str, Any] = {
+            "json": {"query": query, "mode": mode},
+        }
+        for attempt in range(4):
+            try:
+                async with self._http.stream(
+                    method,
+                    url,
+                    timeout=None,
+                    **request_kwargs,
+                ) as r:
+                    if r.status_code >= 400:
+                        body = await r.aread()
+                        raise CliHttpError(
+                            r.status_code, body.decode("utf-8", "replace")
                         )
                     event_type = "message"
-                    data_lines = []
-                elif line.startswith("event:"):
-                    event_type = line[6:].strip()
-                elif line.startswith("data:"):
-                    # SSE spec: strip exactly ONE leading space so payload
-                    # indentation (nested lists, code) survives intact.
-                    chunk = line[5:]
-                    data_lines.append(
-                        chunk[1:] if chunk.startswith(" ") else chunk
-                    )
-                # other SSE fields (`id:`, `retry:`, comments) ignored
+                    event_cursor: int | None = None
+                    data_lines: list[str] = []
+                    async for line in r.aiter_lines():
+                        if line == "":
+                            if data_lines or event_type != "message":
+                                data = "\n".join(data_lines)
+                                if event_cursor is None or event_cursor > cursor:
+                                    if event_cursor is not None:
+                                        cursor = event_cursor
+                                    if event_type == "conversation":
+                                        conversation_id = data
+                                    if event_type in {"done", "error"}:
+                                        terminal = True
+                                    yield ChatEvent(
+                                        event_type=event_type,
+                                        data=data,
+                                        event_cursor=event_cursor,
+                                    )
+                            event_type = "message"
+                            event_cursor = None
+                            data_lines = []
+                        elif line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("id:"):
+                            raw_cursor = line[3:].strip()
+                            event_cursor = (
+                                int(raw_cursor) if raw_cursor.isdigit() else None
+                            )
+                        elif line.startswith("data:"):
+                            chunk = line[5:]
+                            data_lines.append(
+                                chunk[1:] if chunk.startswith(" ") else chunk
+                            )
+            except httpx.HTTPError:
+                if terminal or conversation_id is None or attempt >= 3:
+                    raise
+            if terminal:
+                return
+            if conversation_id is None:
+                # Legacy servers do not emit a durable conversation identity
+                # or terminal cursor. Their clean EOF is still a successful
+                # stream; without an identity there is nothing safe to resume.
+                return
+            if attempt >= 3:
+                raise RuntimeError("chat stream ended before the turn completed")
+            await asyncio.sleep(0.25 * (2 ** attempt))
+            method = "GET"
+            url = f"/v1/conversations/{conversation_id}/events"
+            request_kwargs = {"params": {"after_cursor": cursor}}
 
     async def close_session(self, session_id: str) -> dict[str, Any]:
         r = await self._http.post(f"/v1/sessions/{session_id}/close")

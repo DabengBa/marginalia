@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.config import get_settings
+from marginalia.capacity import CapacityExceeded
 from marginalia.db.models import File as StoredFile
 from marginalia.db.session import get_session, session_scope
 from marginalia.services.folders import (
@@ -277,6 +278,10 @@ async def upload_endpoint(
                 "existing_file_id": e.existing_file_id,
             },
         )
+    except CapacityExceeded:
+        await session.rollback()
+        log.warning("upload rejected by a configured capacity limit")
+        raise
     except Exception:
         await session.rollback()
         log.exception("upload failed unexpectedly destination=%s", destination)

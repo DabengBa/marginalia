@@ -105,7 +105,8 @@ def test_cache_metrics_report_eligible_hit_and_reuse() -> None:
         },
     ])
 
-    assert summary.eligible_hit_ratio == 0.4
+    assert summary.prompt_coverage_ratio == 0.4
+    assert summary.eligible_hit_ratio == 0.8
     assert summary.eligible_reuse_ratio == 0.8
     assert summary.prefix_breaks == 1
 
@@ -127,7 +128,8 @@ def test_cache_metrics_are_exposed_with_live_event_field_names() -> None:
         "cache_eligible_read_tokens": 80,
         "cache_eligible_estimated_tokens": 100,
         "cache_eligible_requests": 1,
-        "cache_eligible_hit_ratio": 0.4,
+        "cache_prompt_coverage_ratio": 0.4,
+        "cache_eligible_hit_ratio": 0.8,
         "cache_eligible_reuse_ratio": 0.8,
         "prompt_prefix_breaks": 0,
         "cache_slo": {
@@ -148,11 +150,13 @@ def test_cache_slo_reports_met_breached_and_insufficient_data() -> None:
         {
             "prompt_tokens": 100,
             "cache_read_tokens": 100,
+            "cache_eligible_tokens": 100,
             "prompt_prefix_preserved": True,
         },
         {
             "prompt_tokens": 100,
             "cache_read_tokens": 95,
+            "cache_eligible_tokens": 100,
             "prompt_prefix_preserved": True,
         },
     ])
@@ -160,11 +164,13 @@ def test_cache_slo_reports_met_breached_and_insufficient_data() -> None:
         {
             "prompt_tokens": 100,
             "cache_read_tokens": 50,
+            "cache_eligible_tokens": 100,
             "prompt_prefix_preserved": True,
         },
         {
             "prompt_tokens": 100,
             "cache_read_tokens": 50,
+            "cache_eligible_tokens": 100,
             "prompt_prefix_preserved": True,
         },
     ])

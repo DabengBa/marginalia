@@ -17,7 +17,7 @@ import { Link } from "react-router-dom";
 import { AlertCircle, Gauge, Send, Square, Sparkles, X, Zap } from "lucide-react";
 
 import { getBaseUrl, sessions, settings as settingsApi } from "@/api/client";
-import { streamChat } from "@/api/chatStream";
+import { cancelChat, streamChat } from "@/api/chatStream";
 import type {
   ChatEvent, ChatImage, ChatMode, LlmSettings, PlanBudgetData, ReplayedTurn, ReplayedToolCall,
   ThinkingEventData,
@@ -315,7 +315,12 @@ export function ChatPage() {
     if (sid) {
       const live = liveStreams.get(sid);
       if (live) {
-        live.abort.abort();
+        const conversationId = live.turns[live.turnIdx]?.conversationId;
+        if (conversationId) {
+          void cancelChat(conversationId).finally(() => live.abort.abort());
+        } else {
+          live.abort.abort();
+        }
         live.turns = updateTurn(live.turns, live.turnIdx, (t) => ({
           ...finishActiveThinking(t),
           done: true,

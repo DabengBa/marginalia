@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from marginalia.db.session import session_scope
+from marginalia.config import get_settings
 from marginalia.repositories import conversations as conversations_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.services.exports import parse_citations
@@ -62,22 +63,36 @@ def _utcnow() -> datetime:
 
 async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
+    settings = get_settings()
+    window_days = int(payload.get("window_days") or CITATION_WINDOW_DAYS)
     cutoff = now - timedelta(
-        days=int(payload.get("window_days") or CITATION_WINDOW_DAYS)
+        days=window_days
     )
     min_citations = int(payload.get("min_citations") or MIN_CITATIONS)
     cap = int(payload.get("cap") or MAX_NEW_RELATIONS_PER_RUN)
+    activity_limit = max(
+        1,
+        int(payload.get("activity_limit") or settings.relation_mining_activity_limit),
+    )
+    candidate_limit = max(
+        1,
+        int(payload.get("candidate_limit") or settings.relation_mining_candidate_limit),
+    )
 
     new_relations = 0
     incremented = 0
     messages_scanned = 0
     pairs_above_threshold = 0
     skipped_dead_entry = 0
+    scan_truncated = False
+    candidate_pairs_truncated = False
 
     async with session_scope() as session:
-        rows = await conversations_repo.list_agent_responses_since(
-            session, cutoff,
+        fetched_rows = await conversations_repo.list_agent_responses_since(
+            session, cutoff, limit=activity_limit + 1,
         )
+        scan_truncated = len(fetched_rows) > activity_limit
+        rows = fetched_rows[:activity_limit]
         messages_scanned = len(rows)
 
         counter: Counter[tuple[str, str]] = Counter()
@@ -88,7 +103,18 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
             ids = sorted(entry_ids)
             for i in range(len(ids)):
                 for j in range(i + 1, len(ids)):
-                    counter[(ids[i], ids[j])] += 1
+                    pair = (ids[i], ids[j])
+                    if pair in counter:
+                        counter[pair] += 1
+                    elif len(counter) < candidate_limit:
+                        counter[pair] = 1
+                    else:
+                        candidate_pairs_truncated = True
+                        break
+                if candidate_pairs_truncated:
+                    break
+            if candidate_pairs_truncated:
+                break
 
         candidates = [
             (pair, n) for pair, n in counter.items() if n >= min_citations
@@ -113,7 +139,7 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
                 continue
             note = (
                 f"Co-cited in {n} assistant turns from the last "
-                f"{CITATION_WINDOW_DAYS} days."
+                f"{window_days} days."
             )
             _, action = await upsert_relation_pair(
                 session,
@@ -135,10 +161,15 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if (new_relations or incremented) else "noop",
             detail={
-                "window_days": int(payload.get("window_days") or CITATION_WINDOW_DAYS),
+                "window_days": window_days,
                 "min_citations": min_citations,
                 "cap": cap,
+                "activity_limit": activity_limit,
+                "candidate_limit": candidate_limit,
                 "messages_scanned": messages_scanned,
+                "scan_truncated": scan_truncated,
+                "candidate_pairs": len(counter),
+                "candidate_pairs_truncated": candidate_pairs_truncated,
                 "pairs_above_threshold": pairs_above_threshold,
                 "new_relations": new_relations,
                 "incremented_relations": incremented,

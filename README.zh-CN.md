@@ -106,6 +106,8 @@ marginalia> 比较一下 raft 和 paxos
 
 `marginalia` 命令是单进程——server / worker / CLI 全在里面,不需要开
 第二个终端。第一次启动会自动初始化数据库 schema,不需要手动跑 migration。
+托管部署可在发布前执行 `marginalia-db-prepare`，然后为 API 和 worker 都设置
+`RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=false`，避免副本启动时并发执行 DDL。
 
 如果希望桌面端、CLI、MCP、通过 skill 驱动的自动化或外部 HTTP 客户端共用
 同一个后端,启动可复用的 HTTP 后端:
@@ -379,9 +381,13 @@ GET  /v1/file-entries/{id}/...         单文件操作
 GET  /v1/search                        metadata 召回
 POST /v1/sessions                      开 chat session
 POST /v1/chat/{session_id}             chat(SSE 流)
+GET  /v1/conversations/{id}/events     按 SSE 游标续播
+POST /v1/conversations/{id}/cancel     主动停止后台 turn
 POST /v1/sessions/{id}/close
 GET  /v1/conversations/{id}/export     导出对话 zip
 GET  /health                           liveness probe(无版本)
+GET  /live                             仅进程存活
+GET  /ready                            数据库与存储就绪探针
 ```
 
 `POST /v1/chat/{session_id}` 返回 `text/event-stream`。事件:
@@ -400,6 +406,7 @@ GET  /health                           liveness probe(无版本)
 ```ini
 MARGINALIA_HOME=~/Marginalia     # 一个根目录;db + library + objects 都在这下面
 DB_BACKEND=sqlite                # 或 postgres
+RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=true # 托管迁移完成后可设为 false
 
 STORAGE_BACKEND=mirror           # 默认。文件以可读文件夹形式存:
                                  #   <home>/library/research/llm/paper.pdf
@@ -407,9 +414,14 @@ STORAGE_BACKEND=mirror           # 默认。文件以可读文件夹形式存:
                                  # 高频改写场景快约 5 倍)/ 's3'
 
 WORKER_ENABLED=true              # embedded 模式默认开
+WORKER_SCHEDULER_ENABLED=true    # false 时仍处理普通任务,但不运行周期调度
 WORKER_RETRY_BASE_SECONDS=60      # 任务重试指数退避起点
 WORKER_RETRY_MAX_SECONDS=3600     # 任务重试退避上限
 MARGINALIA_UPLOAD_MAX_BYTES=0     # 单文件上传上限;0 = 不限制
+LIBRARY_DOCUMENT_LIMIT=0          # 全局可选容量门禁;0 = 关闭
+LIBRARY_STORAGE_BYTES_LIMIT=0
+INGEST_BACKLOG_LIMIT=0
+CHAT_CONCURRENCY_LIMIT=0
 MAINTENANCE_DAILY_TOKEN_BUDGET=0 # 后台维护 24 小时滚动 token 上限;0 = 不限制
 RELATION_BACKGROUND_VETTING_ENABLED=false
 
@@ -425,6 +437,7 @@ EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v4
 SEMANTIC_RECALL_ENABLED=false
 SEMANTIC_INDEX_BACKEND=auto      # auto / file / sqlite-vec
+SECTION_EMBEDDING_MAX_SECTIONS=200 # 0 = 仅保留文档级向量
 
 RERANK_ENABLED=false
 RERANK_API_KEY=
@@ -461,6 +474,11 @@ GUI 仍然只收到一个合并后的 `answer` 事件。可用
 `AGENT_FINAL_ANSWER_CONTINUE_TURNS` 和 `AGENT_FINAL_ANSWER_MAX_CHARS`
 调节续写轮数与最终答案字符上限。
 
+每个对话事件会先写入持久事件表再交付。SSE 使用单调 `id` 游标，桌面端与 CLI
+会从最后游标自动续播；`GET /v1/conversations/{id}/events` 也支持
+`Last-Event-ID`。断开查看连接不会取消后台 turn，只有显式 cancel 才会终止并
+持久化终态错误事件。
+
 ### 可靠性与恢复边界
 
 每次任务领取都会生成独立 delivery owner token。心跳、完成、重试和过期 lease
@@ -470,18 +488,26 @@ GUI 仍然只收到一个合并后的 `answer` 事件。可用
 指数增长；periodic dispatcher 使用时间槽去重键，当前 tick 不会再吞掉自己的
 继任 tick。数据库启动升级时，会先把旧库中重复的 active dedup 任务收敛为最可
 执行的一条，再安装唯一约束，无需手工修库。
+队列专用 worker 可设 `WORKER_SCHEDULER_ENABLED=false`：普通任务照常处理，
+但不会创建或领取 `periodic_tick`。
+保留期清理会分批删除审计记录、终态任务投递记录、task outcome 和持久聊天事件；
+pending/running 任务不会进入清理范围。
 
 `MARGINALIA_UPLOAD_MAX_BYTES` 在 multipart 数据流入时、Starlette spool 之前
 生效；文件字节精确计数，表单 metadata 另有独立上限。上传提交结果不明确时会
 执行补偿清理，本地 `.part` 会删除，失败的 S3 multipart 会 abort；物理对象删除
 由可重试的持久任务表达。PostgreSQL 部署还会用 transaction advisory lock
-串行化冲突的工具作用域，以及同一 session 的并发 turn。
+串行化冲突工具作用域、并发 turn 和容量 check-and-create。使用 transaction
+pooling 代理时应设置 `POSTGRES_PREPARED_STATEMENT_CACHE_SIZE=0`，此时 asyncpg
+使用唯一 prepared statement 名称。`/live` 只检查进程，`/ready` 会并发检查
+数据库和存储，任一依赖超时或失败即返回 503。
+本地与桌面安装保持 `RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=true` 即可；托管部署可先
+统一执行 `marginalia-db-prepare`，再设为 false，使 API/worker 副本启动不碰 DDL。
 
 有意不支持的服务运行时能力仅限于必须更换数据模型的部分：组织/用户与
-ACL/RLS 多租户隔离、共享知识库 slug、持久 agent event inbox、provider attempt
-envelope 表、可重放 durable SSE operation，以及外部 job queue 数据库对账。
-本项目保留单知识库 ownership、当前请求内的 chat stream，并直接轮询自己的
-`tasks` 表；强行模拟这些服务抽象反而会破坏现有架构的不变量。
+ACL/RLS 多租户隔离、共享知识库 slug、provider attempt envelope 表，以及外部
+job queue 数据库对账。本项目保留单知识库 ownership，持久 chat 交付和自己的
+`tasks` 队列都在这一模型内完成。
 
 ## 部署形态
 
@@ -524,8 +550,9 @@ docker compose up -d
 marginalia --server http://localhost:8000
 ```
 
-Compose 在 api 启动时跑 `alembic upgrade head`,通过一次性 init
-容器创建 MinIO bucket。卷(`pgdata` / `miniodata` / `margdata`)
+Compose 会先运行一次性 `marginalia-db-prepare`，成功后才启动不执行 DDL 的
+API/worker；另一个一次性 init 容器创建 MinIO bucket。卷
+(`pgdata` / `miniodata` / `margdata`)
 跨重启持久化。
 
 Compose 默认只把 API 和 MinIO 控制台绑定到 `127.0.0.1`。如果要主动暴露到

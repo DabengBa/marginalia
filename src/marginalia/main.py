@@ -5,12 +5,15 @@ import logging
 import os
 import time
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from hmac import compare_digest
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 import marginalia.tasks.handlers  # noqa: F401  (registers task handlers)
 from marginalia import __version__
@@ -31,13 +34,16 @@ from marginalia.api.routes_webdav_sync import router as webdav_sync_router
 from marginalia.config import LlmConfigError, get_settings, validate_llm_config
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.db.engine import dispose_engine
+from marginalia.db.engine import get_engine
 from marginalia.provider_clients import close_provider_clients
 from marginalia.server_discovery import clear_server_state, write_server_state
 from marginalia.tasks.runner import TaskRunner
 from marginalia.upload_limits import UploadSizeLimitMiddleware
+from marginalia.storage import get_storage
 
 log = logging.getLogger(__name__)
 SLOW_REQUEST_LOG_MS = 10_000
+PUBLIC_PROBE_PATHS = frozenset({"/health", "/live", "/ready"})
 
 
 @asynccontextmanager
@@ -66,7 +72,10 @@ async def lifespan(app: FastAPI):
         else:
             validate_llm_config(settings)
         await bootstrap_schema()
-        log.info("database schema ready")
+        if settings.runtime_schema_bootstrap_enabled:
+            log.info("database schema bootstrap complete")
+        else:
+            log.info("runtime schema bootstrap disabled; using migrated schema")
         await _check_storage_consistency(settings)
         log.info("storage consistency check passed")
         if os.environ.get("MARGINALIA_HTTP_SERVER") == "1":
@@ -238,7 +247,7 @@ async def optional_bearer_auth(request: Request, call_next):
     if (
         not token
         or request.method == "OPTIONS"
-        or request.url.path == "/health"
+        or request.url.path in PUBLIC_PROBE_PATHS
     ):
         return await call_next(request)
     auth = request.headers.get("authorization", "")
@@ -273,7 +282,7 @@ async def request_diagnostics(request: Request, call_next):
     duration_ms = int((time.perf_counter() - started) * 1000)
     response.headers["X-Request-Id"] = request_id
     path = request.url.path
-    if path != "/health" and response.status_code >= 500:
+    if path not in PUBLIC_PROBE_PATHS and response.status_code >= 500:
         log.error(
             "request %s returned %d method=%s path=%s client=%s duration_ms=%d",
             request_id,
@@ -283,7 +292,7 @@ async def request_diagnostics(request: Request, call_next):
             _client_host(request),
             duration_ms,
         )
-    elif path != "/health" and duration_ms >= SLOW_REQUEST_LOG_MS:
+    elif path not in PUBLIC_PROBE_PATHS and duration_ms >= SLOW_REQUEST_LOG_MS:
         log.info(
             "slow request %s returned %d method=%s path=%s duration_ms=%d",
             request_id,
@@ -326,3 +335,43 @@ async def health() -> dict[str, str]:
         "environment": s.app_env,
         "storage_backend": s.storage_backend,
     }
+
+
+@app.get("/live", tags=["meta"])
+async def live() -> dict[str, str]:
+    """Process liveness only; never depends on downstream services."""
+    return {"status": "ok", "version": __version__}
+
+
+async def _bounded_readiness(check, timeout_seconds: float) -> str:  # noqa: ANN001
+    try:
+        await asyncio.wait_for(check, timeout=timeout_seconds)
+    except Exception:
+        return "error"
+    return "ok"
+
+
+async def _database_ready() -> None:
+    async with get_engine().connect() as connection:
+        await connection.execute(text("SELECT 1"))
+
+
+@app.get("/ready", tags=["meta"], response_model=None)
+async def ready() -> Any:
+    """Dependency readiness for traffic admission; never calls an LLM."""
+    settings = get_settings()
+    database, storage = await asyncio.gather(
+        _bounded_readiness(
+            _database_ready(), settings.readiness_timeout_seconds
+        ),
+        _bounded_readiness(
+            get_storage().check_ready(), settings.readiness_timeout_seconds
+        ),
+    )
+    payload = {
+        "status": "ready" if database == storage == "ok" else "not_ready",
+        "checks": {"database": database, "storage": storage},
+    }
+    if payload["status"] != "ready":
+        return JSONResponse(payload, status_code=503)
+    return payload

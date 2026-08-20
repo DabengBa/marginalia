@@ -121,7 +121,9 @@ marginalia> compare this paper with my Paxos notes
 marginalia> /export
 ```
 
-The first launch bootstraps the database schema automatically.
+The first launch bootstraps the database schema automatically. Managed
+deployments can instead run `marginalia-db-prepare` before rollout and set
+`RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=false` for both API and worker replicas.
 
 To share one backend across the desktop app, CLI sessions, MCP, skill-driven
 automation, or external HTTP clients, start the reusable HTTP backend instead:
@@ -389,11 +391,15 @@ GET  /v1/file-entries/{entry_id}/metadata
 GET  /v1/file-entries/{entry_id}/content
 POST /v1/sessions
 POST /v1/chat/{session_id}          # Server-Sent Events
+GET  /v1/conversations/{id}/events  # resume after an SSE cursor
+POST /v1/conversations/{id}/cancel
 GET  /v1/conversations/{id}/export
 POST /v1/tend
 GET  /v1/tasks/active
 GET  /v1/settings/llm
 GET  /health
+GET  /live
+GET  /ready
 ```
 
 The desktop GUI and CLI both use the same API.
@@ -409,11 +415,17 @@ Core `.env` fields:
 ```ini
 MARGINALIA_HOME=~/Marginalia
 DB_BACKEND=sqlite                  # sqlite or postgres
+RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=true # false after managed Alembic migration
 STORAGE_BACKEND=mirror             # mirror, local, or s3
 WORKER_ENABLED=true
+WORKER_SCHEDULER_ENABLED=true       # false: normal tasks only, no periodic fan-out
 WORKER_RETRY_BASE_SECONDS=60
 WORKER_RETRY_MAX_SECONDS=3600
 MARGINALIA_UPLOAD_MAX_BYTES=0      # per-file upload cap; 0 = unlimited
+LIBRARY_DOCUMENT_LIMIT=0           # optional global gates; 0 = disabled
+LIBRARY_STORAGE_BYTES_LIMIT=0
+INGEST_BACKLOG_LIMIT=0
+CHAT_CONCURRENCY_LIMIT=0
 AUTO_LIFECYCLE_ENABLED=false
 MAINTENANCE_DAILY_TOKEN_BUDGET=0  # rolling 24h background cap; 0 = unlimited
 RELATION_BACKGROUND_VETTING_ENABLED=false
@@ -433,6 +445,7 @@ EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v4
 SEMANTIC_RECALL_ENABLED=false
 SEMANTIC_INDEX_BACKEND=auto        # auto, file, sqlite-vec
+SECTION_EMBEDDING_MAX_SECTIONS=200 # 0 keeps document-level vectors only
 
 RERANK_ENABLED=false
 RERANK_API_KEY=
@@ -477,6 +490,12 @@ if you want the periodic worker to batch-vet relation edges ahead of time.
 
 When a long final answer hits the model token limit, Marginalia can continue it server-side and emit one merged answer event to the GUI. Tune `AGENT_FINAL_ANSWER_CONTINUE_TURNS` and `AGENT_FINAL_ANSWER_MAX_CHARS` for research-heavy deployments.
 
+Chat events are committed to a per-conversation ledger before delivery. SSE
+frames carry monotonic `id` cursors; desktop and CLI clients reconnect from
+the last cursor, and `GET /v1/conversations/{id}/events` also accepts
+`Last-Event-ID`. Disconnecting a viewer does not cancel the turn. Explicit
+cancel requests stop the background task and persist a terminal error event.
+
 ### Reliability and recovery
 
 Each claimed task receives a unique delivery-owner token. Heartbeats,
@@ -486,7 +505,11 @@ another worker has reclaimed it. Losing ownership also cancels the old local
 handler. Retry delays grow exponentially between
 `WORKER_RETRY_BASE_SECONDS` and `WORKER_RETRY_MAX_SECONDS`; periodic dispatcher
 ticks use time-slot keys so the running tick cannot consume its successor.
-During schema bootstrap, legacy duplicate active dedup keys are collapsed to
+Set `WORKER_SCHEDULER_ENABLED=false` on queue-only workers: they continue
+claiming ordinary tasks but neither seed nor execute `periodic_tick`.
+Retention pruning deletes audit rows, terminal task delivery records, task
+outcomes, and durable chat events in bounded batches. During schema bootstrap,
+legacy duplicate active dedup keys are collapsed to
 the best executable task before the uniqueness constraint is installed.
 
 `MARGINALIA_UPLOAD_MAX_BYTES` is checked while multipart data is streaming,
@@ -495,16 +518,21 @@ bounded amount of form metadata. Upload commit ambiguity triggers compensating
 cleanup, local `.part` files are removed, failed S3 multipart uploads are
 aborted, and physical object deletion is represented by a persistent retryable
 task. PostgreSQL deployments also use transaction advisory locks for
-conflicting tool scopes and for concurrent turns in the same session.
+conflicting tool scopes, concurrent turns, and capacity check-and-create
+windows. Transaction-pooled PostgreSQL proxies should set
+`POSTGRES_PREPARED_STATEMENT_CACHE_SIZE=0`; asyncpg then uses unique prepared
+statement names. `/live` checks only the process, while `/ready` concurrently
+checks database and storage with `READINESS_TIMEOUT_SECONDS` and returns 503
+when either dependency is unavailable. Local and desktop installs leave
+`RUNTIME_SCHEMA_BOOTSTRAP_ENABLED=true`; managed deployments can run
+`marginalia-db-prepare` once and set it to false so API and worker replicas do
+not run startup DDL concurrently.
 
-The intentionally unsupported service-runtime layer is limited to features
-that require a different multi-tenant data model: organizations and users,
-ACL/RLS isolation, shared knowledge-base slugs, a persistent agent event inbox,
-provider-attempt envelope tables, replayable durable SSE operations, and
-reconciliation with an external job-queue database. Marginalia instead keeps
-its single-library ownership model, streams chat from the active request, and
-polls its own `tasks` table; emulating those service abstractions would weaken
-rather than complete the existing architecture.
+Features that require a different multi-tenant data model remain out of scope:
+organizations and users, ACL/RLS isolation, shared-library slugs, and an
+external job-queue database. Marginalia keeps single-library ownership and
+polls its own `tasks` table, while durable chat delivery stays within that
+model.
 
 ## Storage and Deployment
 
@@ -539,6 +567,9 @@ Docker compose starts API, worker, Postgres, and MinIO:
 echo "LLM_DEFAULT_API_KEY=sk-..." > .env
 docker compose up -d
 ```
+
+Compose runs the one-shot database preparation service first, then starts API
+and worker with runtime schema bootstrap disabled.
 
 The compose file binds the API and MinIO console to `127.0.0.1` by default.
 If you deliberately expose the API on a LAN, set `MARGINALIA_API_TOKEN` and

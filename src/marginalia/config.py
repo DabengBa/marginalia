@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     marginalia_api_token: str | None = None
     marginalia_api_host: str = "127.0.0.1"
     marginalia_api_port: int = 8000
+    readiness_timeout_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
 
     # Single root for all on-disk state (db, library, caches). Default
     # is ~/Marginalia. Per-component overrides below take precedence
@@ -48,6 +49,17 @@ class Settings(BaseSettings):
     postgres_pool_size: int = Field(default=10, ge=1, le=200)
     postgres_max_overflow: int = Field(default=20, ge=0, le=500)
     postgres_pool_timeout_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
+    # Set to zero for transaction-pooled PostgreSQL proxies. asyncpg still
+    # prepares statements in that mode, so the engine assigns globally unique
+    # names to avoid collisions when a transaction lands on another server
+    # connection.
+    postgres_prepared_statement_cache_size: int = Field(
+        default=100, ge=0, le=10_000,
+    )
+    # Local and desktop installs keep the zero-setup bootstrap path. Managed
+    # deployments can disable startup DDL after applying Alembic migrations,
+    # preventing API and worker replicas from racing over schema changes.
+    runtime_schema_bootstrap_enabled: bool = True
 
     # mirror = folder-tree on disk matching the user's intent; default.
     # local  = UUID-flat object pool; faster, dedup-on, less human-friendly.
@@ -80,6 +92,7 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: int = 20
     worker_retry_base_seconds: float = Field(default=60.0, ge=0.1, le=86_400.0)
     worker_retry_max_seconds: float = Field(default=3_600.0, ge=0.1, le=604_800.0)
+    worker_scheduler_enabled: bool = True
 
     # Automatic active -> demoted -> archived transitions are opt-in.
     # Personal knowledge bases often prefer manual lifecycle control, while
@@ -90,6 +103,35 @@ class Settings(BaseSettings):
     # 0 disables the cap. Foreground ingest/chat reflection are not limited.
     maintenance_daily_token_budget: int = 0
     relation_background_vetting_enabled: bool = False
+    audit_retention_days: int = Field(default=90, ge=0, le=3650)
+    task_retention_days: int = Field(default=30, ge=0, le=3650)
+    task_outcome_retention_days: int = Field(default=30, ge=0, le=3650)
+    agent_event_retention_days: int = Field(default=30, ge=0, le=3650)
+    prune_batch_size: int = Field(default=1_000, ge=1, le=100_000)
+    prune_max_batches: int = Field(default=10, ge=1, le=1_000)
+    # Bound relation mining at every expensive stage. These are intentionally
+    # independent from the small number of relations written per run: limiting
+    # only output would still allow unbounded reads and in-memory pair sets.
+    relation_mining_entry_page_size: int = Field(
+        default=20_000, ge=100, le=100_000,
+    )
+    relation_mining_activity_limit: int = Field(
+        default=50_000, ge=100, le=500_000,
+    )
+    relation_mining_eligible_tag_limit: int = Field(
+        default=20_000, ge=100, le=100_000,
+    )
+    relation_mining_candidate_limit: int = Field(
+        default=100_000, ge=1_000, le=1_000_000,
+    )
+
+    # Optional global capacity gates. Zero preserves the historical unlimited
+    # behavior. They are useful when a shared deployment must fail fast before
+    # an upload or background backlog consumes all available resources.
+    library_document_limit: int = Field(default=0, ge=0)
+    library_storage_bytes_limit: int = Field(default=0, ge=0)
+    ingest_backlog_limit: int = Field(default=0, ge=0)
+    chat_concurrency_limit: int = Field(default=0, ge=0, le=10_000)
 
     # Default policy when an upload / rename / move would collide with an
     # existing display_name in the same folder. `rename` suffixes ` (1)`,
@@ -277,6 +319,7 @@ class Settings(BaseSettings):
     semantic_recall_limit: int = 100
     semantic_rebuild_page_size: int = Field(default=100, ge=1, le=1_000)
     section_backfill_min_score: float = Field(default=0.45, ge=0.0, le=1.0)
+    section_embedding_max_sections: int = Field(default=200, ge=0, le=200)
 
     # --- Optional rerank ----------------------------------------------------
     # Rerank is a second-stage retrieval refinement over already-recalled

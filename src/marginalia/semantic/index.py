@@ -41,7 +41,6 @@ SQLITE_VEC_INDEX_FILENAME = "vectors.sqlite"
 # description accumulated many chunked sections can otherwise exceed the
 # provider token limit and make the whole batch (and thus the build) fail.
 EMBEDDING_TEXT_MAX_CHARS = 6000
-SECTION_EMBEDDING_MAX_SECTIONS = 200
 
 
 class EmbeddingClient(Protocol):
@@ -1604,6 +1603,7 @@ async def _iter_semantic_input_pages(
 def _semantic_inputs(
     pairs: list[tuple[FileEntry, File]],
 ) -> list[_SemanticInput]:
+    max_sections = get_settings().section_embedding_max_sections
     records: list[_SemanticInput] = []
     for entry, file_row in pairs:
         full_text = _entry_text(entry, file_row)
@@ -1618,6 +1618,7 @@ def _semantic_inputs(
         for section_id, text in _section_embedding_inputs(
             file_row.description,
             summary=file_row.summary,
+            max_sections=max_sections,
         ):
             records.append(_SemanticInput(
                 entry=entry,
@@ -1639,7 +1640,13 @@ def _section_embedding_inputs(
     description: Any,
     *,
     summary: str | None,
+    max_sections: int | None = None,
 ) -> list[tuple[str, str]]:
+    if max_sections is None:
+        max_sections = get_settings().section_embedding_max_sections
+    max_sections = max(0, int(max_sections))
+    if max_sections == 0:
+        return []
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for section in _stable_sections(description):
@@ -1655,7 +1662,7 @@ def _section_embedding_inputs(
         if text:
             out.append((section_id, text))
             seen.add(section_id)
-        if len(out) >= SECTION_EMBEDDING_MAX_SECTIONS:
+        if len(out) >= max_sections:
             break
     return out
 

@@ -47,15 +47,25 @@ async def oldest_occurred_at(db: AsyncSession) -> datetime | None:
     ).scalar_one_or_none()
 
 
-async def delete_before(db: AsyncSession, cutoff: datetime) -> int:
+async def delete_before(
+    db: AsyncSession, cutoff: datetime, *, limit: int | None = None,
+) -> int:
     """Delete every audit row strictly older than `cutoff`. Returns row
     count. Used by the prune handler — this is the only legal delete path
     on this table."""
-    return (
-        await db.execute(
-            delete(AuditEvent).where(AuditEvent.occurred_at < cutoff)
-        )
-    ).rowcount or 0
+    if limit is None:
+        statement = delete(AuditEvent).where(AuditEvent.occurred_at < cutoff)
+    else:
+        ids = list((await db.execute(
+            select(AuditEvent.id)
+            .where(AuditEvent.occurred_at < cutoff)
+            .order_by(AuditEvent.occurred_at.asc(), AuditEvent.id.asc())
+            .limit(max(1, int(limit)))
+        )).scalars().all())
+        if not ids:
+            return 0
+        statement = delete(AuditEvent).where(AuditEvent.id.in_(ids))
+    return (await db.execute(statement)).rowcount or 0
 
 
 async def latest_failed_ingest_reasons_for_files(

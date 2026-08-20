@@ -17,7 +17,7 @@ class CacheUsageSummary:
     prefix_breaks: int = 0
 
     @property
-    def eligible_hit_ratio(self) -> float | None:
+    def prompt_coverage_ratio(self) -> float | None:
         if self.eligible_prompt_tokens <= 0:
             return None
         return self.eligible_read_tokens / self.eligible_prompt_tokens
@@ -28,6 +28,11 @@ class CacheUsageSummary:
             return None
         return min(1.0, self.eligible_read_tokens / self.eligible_estimated_tokens)
 
+    @property
+    def eligible_hit_ratio(self) -> float | None:
+        """Backward-compatible name for eligible-prefix reuse."""
+        return self.eligible_reuse_ratio
+
     def slo_payload(
         self,
         *,
@@ -36,10 +41,10 @@ class CacheUsageSummary:
     ) -> dict[str, int | float | str]:
         if (
             self.eligible_requests < minimum_eligible_requests
-            or self.eligible_hit_ratio is None
+            or self.eligible_reuse_ratio is None
         ):
             status = "insufficient_data"
-        elif self.eligible_hit_ratio >= minimum_hit_ratio:
+        elif self.eligible_reuse_ratio >= minimum_hit_ratio:
             status = "met"
         else:
             status = "breached"
@@ -59,6 +64,7 @@ class CacheUsageSummary:
             "eligible_estimated_tokens": self.eligible_estimated_tokens,
             "eligible_requests": self.eligible_requests,
             "prefix_breaks": self.prefix_breaks,
+            "prompt_coverage_ratio": self.prompt_coverage_ratio,
             "eligible_hit_ratio": self.eligible_hit_ratio,
             "eligible_reuse_ratio": self.eligible_reuse_ratio,
         }

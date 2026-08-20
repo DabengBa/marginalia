@@ -74,7 +74,8 @@ ARG APT_MIRROR
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
-    MARGINALIA_HOME=/data
+    MARGINALIA_HOME=/data \
+    ALEMBIC_CONFIG=/app/alembic.ini
 
 # Runtime libs only — no compilers. libmagic helps content-type sniffing
 # in some upload paths; pypdfium2 needs no system lib (statically linked).
@@ -105,9 +106,9 @@ USER marginalia
 
 EXPOSE 8000
 
-# Schema bootstrap runs on app startup (marginalia.db.bootstrap), so the
-# container just needs to exec uvicorn. Worker service overrides command
-# to `marginalia-worker`.
+# Schema bootstrap runs on app startup by default. Managed deployments can
+# migrate first and disable startup DDL with RUNTIME_SCHEMA_BOOTSTRAP_ENABLED.
+# The worker service overrides the command to `marginalia-worker`.
 #
 # SECURITY: this binds 0.0.0.0 *inside the container*. If you publish the
 # port beyond loopback (e.g. `docker run -p 8000:8000`, or editing the

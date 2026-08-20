@@ -14,7 +14,7 @@ from marginalia.repositories import tasks as tasks_repo
 from marginalia.repositories import task_outcomes as outcomes_repo
 from marginalia.services.ingest_status import mark_file_failed_for_dead_ingest_task
 from marginalia.tasks import handlers as _handlers_pkg  # noqa: F401  (register)
-from marginalia.tasks.kinds import LLM_DEPENDENT_KINDS, get_handler
+from marginalia.tasks.kinds import KIND_PERIODIC_TICK, LLM_DEPENDENT_KINDS, get_handler
 from marginalia.tasks.usage import (
     bind_accumulator, unbind_accumulator, UsageCounters,
 )
@@ -61,8 +61,9 @@ class TaskRunner:
         if self._loop_task is not None:
             return
         await self._sweep_llm_dependent_if_no_key()
-        from marginalia.tasks.handlers.periodic_tick import bootstrap_periodic_tick
-        await bootstrap_periodic_tick()
+        if self._current_settings().worker_scheduler_enabled:
+            from marginalia.tasks.handlers.periodic_tick import bootstrap_periodic_tick
+            await bootstrap_periodic_tick()
         self._stop.clear()
         self._loop_task = asyncio.create_task(self._run(), name="marginalia.task_runner")
 
@@ -173,6 +174,11 @@ class TaskRunner:
                 session,
                 now=now,
                 limit=limit,
+                exclude_kinds=(
+                    ()
+                    if settings.worker_scheduler_enabled
+                    else (KIND_PERIODIC_TICK,)
+                ),
             )
             if not rows:
                 await session.commit()

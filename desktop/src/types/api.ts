@@ -143,9 +143,13 @@ export interface SessionList {
   sessions: SessionListEntry[];
   limit: number;
   offset: number;
+  next_cursor?: string | null;
 }
 
 export interface ReplayedToolCall {
+  tool_call_id?: string | null;
+  tool_index?: number | null;
+  turn?: number | null;
   name: string | null;
   arguments: Record<string, unknown>;
   /** Server-resolved one-line summary, mirrors the live SSE
@@ -193,6 +197,7 @@ export interface ReplayedTurn {
     cache_eligible_estimated_tokens: number;
     cache_eligible_requests: number;
     cache_eligible_hit_ratio: number | null;
+    cache_prompt_coverage_ratio: number | null;
     cache_eligible_reuse_ratio: number | null;
     prompt_prefix_breaks: number;
     cache_slo: CacheSlo;
@@ -228,6 +233,7 @@ export interface SessionTotals {
     cache_eligible_estimated_tokens: number;
     cache_eligible_requests: number;
     cache_eligible_hit_ratio: number | null;
+    cache_prompt_coverage_ratio: number | null;
     cache_eligible_reuse_ratio: number | null;
     prompt_prefix_breaks: number;
     cache_slo: CacheSlo;
@@ -283,6 +289,7 @@ export interface RecentTask {
 
 export interface RecentTasks {
   items: RecentTask[];
+  next_cursor?: string | null;
 }
 
 export type OnConflict = "rename" | "error" | "skip";
@@ -316,6 +323,8 @@ export interface ChatEvent<T = unknown> {
   type: ChatEventType;
   data: T;
   raw: string;
+  eventCursor?: number;
+  conversationId?: string;
 }
 
 export interface ConversationEventData {
@@ -394,10 +403,28 @@ export interface ServerSettings {
   postgres_pool_size: number;
   postgres_max_overflow: number;
   postgres_pool_timeout_seconds: number;
+  postgres_prepared_statement_cache_size: number;
+  runtime_schema_bootstrap_enabled: boolean;
+  readiness_timeout_seconds: number;
   storage_backend: string;
   worker_enabled: boolean;
+  worker_scheduler_enabled: boolean;
   worker_batch_size: number;
   bulk_reprocess_page_size: number;
+  audit_retention_days: number;
+  task_retention_days: number;
+  task_outcome_retention_days: number;
+  agent_event_retention_days: number;
+  prune_batch_size: number;
+  prune_max_batches: number;
+  relation_mining_entry_page_size: number;
+  relation_mining_activity_limit: number;
+  relation_mining_eligible_tag_limit: number;
+  relation_mining_candidate_limit: number;
+  library_document_limit: number;
+  library_storage_bytes_limit: number;
+  ingest_backlog_limit: number;
+  chat_concurrency_limit: number;
   auto_lifecycle_enabled: boolean;
   default_on_conflict: string;
   agent_plan_max_tokens: number;
@@ -430,6 +457,9 @@ export interface ServerSettings {
   semantic_index_backend: "auto" | "file" | "sqlite-vec";
   semantic_recall_enabled: boolean;
   semantic_recall_limit: number;
+  semantic_rebuild_page_size: number;
+  section_backfill_min_score: number;
+  section_embedding_max_sections: number;
   semantic_recall_configured: boolean;
   semantic_index: SemanticIndexStatus;
   rerank_enabled: boolean;

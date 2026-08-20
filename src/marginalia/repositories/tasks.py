@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models.tasks import Task
@@ -42,6 +42,7 @@ async def claim_pending_ids(
     *,
     now: datetime,
     limit: int,
+    exclude_kinds: Sequence[str] = (),
 ) -> list[str]:
     """Pick the next pending task ids, ordered by `(priority, scheduled_at)`.
     The caller turns these into `running`. Postgres uses FOR UPDATE SKIP
@@ -53,6 +54,8 @@ async def claim_pending_ids(
         .order_by(Task.priority.asc(), Task.scheduled_at.asc())
         .limit(limit)
     )
+    if exclude_kinds:
+        stmt = stmt.where(Task.kind.not_in(list(exclude_kinds)))
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     rows = (await db.execute(stmt)).scalars().all()
@@ -358,6 +361,38 @@ async def list_by_ids(db: AsyncSession, ids: list[str]) -> list[Task]:
     return list(rows)
 
 
+async def oldest_terminal_finished_at(db: AsyncSession) -> datetime | None:
+    return await db.scalar(
+        select(func.min(Task.finished_at)).where(
+            Task.status.in_(("done", "dead")),
+            Task.finished_at.is_not(None),
+        )
+    )
+
+
+async def delete_terminal_batch_before(
+    db: AsyncSession,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> int:
+    """Delete one oldest-first batch of terminal task delivery records."""
+    ids = list((await db.execute(
+        select(Task.id)
+        .where(
+            Task.status.in_(("done", "dead")),
+            Task.finished_at.is_not(None),
+            Task.finished_at < cutoff,
+        )
+        .order_by(Task.finished_at.asc(), Task.id.asc())
+        .limit(max(1, int(limit)))
+    )).scalars().all())
+    if not ids:
+        return 0
+    result = await db.execute(delete(Task).where(Task.id.in_(ids)))
+    return max(0, int(result.rowcount or 0))
+
+
 async def list_by_status(
     db: AsyncSession,
     *,
@@ -380,7 +415,10 @@ async def list_by_status(
 
 
 async def list_recent_with_usage(
-    db: AsyncSession, *, limit: int,
+    db: AsyncSession,
+    *,
+    limit: int,
+    before: tuple[datetime, str] | None = None,
 ) -> list[dict]:
     """Recently-finished tasks joined with their task_outcomes row so the
     StatusBar popover can show duration + tokens + cache % per task.
@@ -403,11 +441,20 @@ async def list_recent_with_usage(
         .limit(1)
         .scalar_subquery()
     )
+    statement = select(Task, latest_detail.label("detail")).where(
+        Task.status.in_(("done", "dead")),
+        Task.finished_at.is_not(None),
+    )
+    if before is not None:
+        timestamp, row_id = before
+        statement = statement.where(or_(
+            Task.finished_at < timestamp,
+            and_(Task.finished_at == timestamp, Task.id < row_id),
+        ))
     rows = (
         await db.execute(
-            select(Task, latest_detail.label("detail"))
-            .where(Task.status.in_(("done", "dead")))
-            .order_by(Task.finished_at.desc())
+            statement
+            .order_by(Task.finished_at.desc(), Task.id.desc())
             .limit(limit)
         )
     ).all()

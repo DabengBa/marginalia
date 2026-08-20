@@ -45,6 +45,7 @@ class AuditEvent(Base, IdMixin):
     __tablename__ = "audit_events"
     __table_args__ = (
         Index("ix_audit_events_occurred_at", "occurred_at"),
+        Index("ix_audit_events_occurred_id", "occurred_at", "id"),
         Index("ix_audit_events_session_occurred", "session_id", "occurred_at"),
         Index("ix_audit_events_conversation_occurred", "conversation_id", "occurred_at"),
         Index("ix_audit_events_task_occurred", "task_id", "occurred_at"),
@@ -73,6 +74,12 @@ class Session(Base, IdMixin):
     __tablename__ = "sessions"
     __table_args__ = (
         Index("ix_sessions_deleted_started", "deleted_at", "started_at"),
+        Index(
+            "ix_sessions_deleted_started_id",
+            "deleted_at",
+            "started_at",
+            "id",
+        ),
         CheckConstraint(
             f"end_reason IS NULL OR {_in_clause('end_reason', SESSION_END_REASONS)}",
             name="end_reason",
@@ -127,6 +134,7 @@ class Conversation(Base, IdMixin):
         ),
         Index("ix_conversations_started_at", "started_at"),
         Index("ix_conversations_ended_at", "ended_at"),
+        Index("ix_conversations_active_started", "ended_at", "started_at"),
     )
 
     session_id: Mapped[str] = mapped_column(
@@ -148,3 +156,25 @@ class Conversation(Base, IdMixin):
     total_cost_estimate: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, default=Decimal("0")
     )
+
+
+class AgentEvent(Base, IdMixin):
+    """Durable public event emitted while one conversation turn runs."""
+
+    __tablename__ = "agent_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "cursor", name="uq_agent_events_conversation_cursor"
+        ),
+        Index("ix_agent_events_conversation_cursor", "conversation_id", "cursor"),
+        Index("ix_agent_events_created_at", "created_at"),
+        Index("ix_agent_events_created_id", "created_at", "id"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    cursor: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    data: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)

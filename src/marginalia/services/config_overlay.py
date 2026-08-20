@@ -108,6 +108,7 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "semantic_recall_limit",
     "semantic_rebuild_page_size",
     "section_backfill_min_score",
+    "section_embedding_max_sections",
     "rerank_enabled",
     "rerank_api_key",
     "rerank_base_url",
@@ -291,6 +292,7 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "embedding_batch_size",
             "semantic_recall_limit",
             "semantic_rebuild_page_size",
+            "section_embedding_max_sections",
             "rerank_tps",
             "rerank_batch_size",
             "rerank_top_n",
@@ -343,6 +345,8 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 upper = 1000
             elif k == "semantic_rebuild_page_size":
                 upper = 1000
+            elif k == "section_embedding_max_sections":
+                lower, upper = 0, 200
             elif k == "agent_cache_slo_min_eligible_requests":
                 upper = 1_000_000
             elif k == "conversation_compaction_reserve_tokens":

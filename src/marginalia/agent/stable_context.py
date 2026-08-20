@@ -133,7 +133,13 @@ Citations:
 Tool strategy:
 - Follow the plan, then choose the tool path that actually fits the step.
 - For broad knowledge-base material recall, prefer `recall_knowledge` using
-  terms derived from the user's request and the plan.
+  terms derived from the user's request and the plan. For example, a
+  project-name lookup can use the complete arguments object
+  `{"text": "Project Phoenix"}`.
+- Use `search_metadata` only for a distinct structured follow-up after broad
+  recall, such as a narrow tag, catalog, folder, lifecycle, or kind filter.
+- Every tool call must provide one complete JSON arguments object matching
+  that tool's input schema.
 - For niche or fuzzy questions, preserve the user's exact words, names,
   numbers, dates, and file-like phrases as text recall terms; do not rely only
   on popular snapshot tags.

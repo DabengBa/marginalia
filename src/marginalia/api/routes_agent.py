@@ -26,6 +26,7 @@ from marginalia.agent.runtime import _public_plan_text, _rewrite_footnotes_for_d
 from marginalia.agent.runtime import _strip_session_name_line
 from marginalia.agent.runtime import TOOL_RESULT_PREVIEW_LEN
 from marginalia.agent import tool_display
+from marginalia.api.pagination import decode_desc_cursor, encode_desc_cursor
 from marginalia.config import get_settings
 from marginalia.db.models import Session as SessionRow, TaskOutcome
 from marginalia.db.session import get_session
@@ -58,6 +59,7 @@ def _cache_metric_fields(llm_calls: list[dict[str, Any]]) -> dict[str, Any]:
         "cache_eligible_read_tokens": summary.eligible_read_tokens,
         "cache_eligible_estimated_tokens": summary.eligible_estimated_tokens,
         "cache_eligible_requests": summary.eligible_requests,
+        "cache_prompt_coverage_ratio": summary.prompt_coverage_ratio,
         "cache_eligible_hit_ratio": summary.eligible_hit_ratio,
         "cache_eligible_reuse_ratio": summary.eligible_reuse_ratio,
         "prompt_prefix_breaks": summary.prefix_breaks,
@@ -167,6 +169,7 @@ async def delete_session(
 async def list_sessions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    cursor: str | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """List sessions for the chat sidebar, ordered most-recent first.
@@ -175,7 +178,19 @@ async def list_sessions(
     session-title preview, turn count, started_at / ended_at, and the close
     reason if any.
     """
-    rows = await session_service.list_sessions(db, limit=limit, offset=offset)
+    before = decode_desc_cursor(cursor) if cursor is not None else None
+    fetched = await session_service.list_sessions(
+        db,
+        limit=limit + 1,
+        offset=offset,
+        before=before,
+    )
+    rows = fetched[:limit]
+    next_cursor = (
+        encode_desc_cursor(rows[-1].started_at, rows[-1].id)
+        if len(fetched) > limit and rows
+        else None
+    )
     latest_modes = await session_service.latest_session_modes(
         db, [s.id for s in rows],
     )
@@ -212,6 +227,7 @@ async def list_sessions(
         ],
         "limit": limit,
         "offset": offset,
+        "next_cursor": next_cursor,
     }
 
 
@@ -364,6 +380,9 @@ async def session_messages(
             else:
                 preview = None
             tool_calls.append({
+                "tool_call_id": tc.get("tool_call_id"),
+                "tool_index": tc.get("tool_index"),
+                "turn": tc.get("turn"),
                 "name": name,
                 "arguments": args,
                 "display": display,

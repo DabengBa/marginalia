@@ -53,6 +53,7 @@ import time
 import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Literal, Mapping, Sequence
 
 from marginalia.agent.compression_adapter import maybe_compress_tool_result_for_model
@@ -122,6 +123,7 @@ MAX_TOOL_RESULT_LEN = 50_000
 QUICK_EXECUTE_MAX_TURNS = 4
 STANDARD_EXECUTE_MAX_TURNS = 8
 AUTO_MAX_BUDGET_UPGRADES = 2
+MALFORMED_TOOL_ARGUMENT_REPAIR_LIMIT = 2
 QUICK_FORCED_ANSWER_RETRIES = 1
 MAX_FINALIZATION_ATTEMPTS = 2
 # Structured-truncation safety net: how many trim passes before falling
@@ -191,6 +193,12 @@ FINALIZATION_RETRY_NUDGE = (
     "[runtime guard] The previous finalizing response was not a valid complete "
     "answer: {issue}. Return the entire corrected Markdown answer now. Do not "
     "call tools or omit supported claims."
+)
+MALFORMED_TOOL_ARGUMENT_NUDGE = (
+    "[runtime guard] One or more tool calls were not executed because their "
+    "arguments were not valid JSON. Retry the needed call now with exactly one "
+    "complete JSON object matching the tool schema. Do not use Markdown code "
+    "fences, comments, trailing commas, or blank values."
 )
 
 _FUTURE_ACTION_RE = re.compile(
@@ -732,6 +740,7 @@ async def run_turn(
     user_message: str,
     images: list[ImageBlock] | None = None,
     options: RunOptions | None = None,
+    capacity_reserved: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Run one user turn as an event stream.
 
@@ -771,6 +780,21 @@ async def run_turn(
             turn_user_message = _vision_fallback_user_message(user_message, description)
 
     async with session_scope() as db:
+        from marginalia.capacity import enforce_chat_concurrency
+
+        stale_seconds = (
+            settings.agent_turn_timeout_seconds
+            if settings.agent_turn_timeout_seconds > 0
+            else 86_400.0
+        )
+        if not capacity_reserved:
+            await enforce_chat_concurrency(
+                db,
+                limit=settings.chat_concurrency_limit,
+                stale_before=datetime.now(timezone.utc) - timedelta(
+                    seconds=max(300.0, stale_seconds)
+                ),
+            )
         last = await session_service.latest_turn_index(db, session_id)
         # Explicit None check — `last or -1` would treat turn_index 0 as
         # falsy and re-issue 0 for the second turn, colliding with the
@@ -1039,14 +1063,26 @@ async def run_turn(
             "cache_eligible_read_tokens": usage.cache_eligible_read_tokens,
             "cache_eligible_estimated_tokens": usage.cache_eligible_estimated_tokens,
             "cache_eligible_requests": usage.cache_eligible_requests,
-            "cache_eligible_hit_ratio": (
+            "cache_prompt_coverage_ratio": (
                 usage.cache_eligible_read_tokens / usage.cache_eligible_prompt_tokens
                 if usage.cache_eligible_prompt_tokens > 0
                 else None
             ),
+            "cache_eligible_hit_ratio": (
+                min(
+                    1.0,
+                    usage.cache_eligible_read_tokens
+                    / usage.cache_eligible_estimated_tokens,
+                )
+                if usage.cache_eligible_estimated_tokens > 0
+                else None
+            ),
             "cache_eligible_reuse_ratio": (
-                usage.cache_eligible_read_tokens
-                / usage.cache_eligible_estimated_tokens
+                min(
+                    1.0,
+                    usage.cache_eligible_read_tokens
+                    / usage.cache_eligible_estimated_tokens,
+                )
                 if usage.cache_eligible_estimated_tokens > 0
                 else None
             ),
@@ -2117,7 +2153,9 @@ async def _run_execute_phase(
     max_final_chars = max(0, settings.agent_final_answer_max_chars)
     max_total_turns = hard_execute_turns + max_final_continuations + (
         QUICK_FORCED_ANSWER_RETRIES if quick_mode else 0
-    ) + (MAX_FINALIZATION_ATTEMPTS if explicit_finalization else 0)
+    ) + (MAX_FINALIZATION_ATTEMPTS if explicit_finalization else 0) + (
+        MALFORMED_TOOL_ARGUMENT_REPAIR_LIMIT
+    )
 
     last_text: str | None = None
     final_parts: list[str] = []
@@ -2128,6 +2166,7 @@ async def _run_execute_phase(
     budget_upgrade_notice: dict[str, Any] | None = None
     tool_calls_seen = False
     no_tool_repair_used = False
+    malformed_tool_argument_repairs = 0
     answer_phase: AnswerPhase = (
         "researching" if explicit_finalization else "finalizing"
     )
@@ -2181,14 +2220,15 @@ async def _run_execute_phase(
 
     for turn in range(max_total_turns):
         max_execute_turns = budget_state.limit
+        effective_execute_turns = max_execute_turns + malformed_tool_argument_repairs
         if (
             explicit_finalization
             and answer_phase == "researching"
-            and turn >= max_execute_turns - 1
+            and turn >= effective_execute_turns - 1
         ):
             enter_finalizing()
         if (
-            turn >= max_execute_turns
+            turn >= effective_execute_turns
             and not continuing_final_answer
             and not quick_forced_answer_active
             and not (
@@ -2201,7 +2241,7 @@ async def _run_execute_phase(
         auto_budget_final_round = (
             budget_state.auto
             and not continuing_final_answer
-            and turn >= max_execute_turns - 1
+            and turn >= effective_execute_turns - 1
         )
         force_final_answer = (
             (explicit_finalization and answer_phase == "finalizing")
@@ -2209,7 +2249,10 @@ async def _run_execute_phase(
                 not explicit_finalization
                 and (quick_mode or auto_budget_final_round)
                 and not continuing_final_answer
-                and (turn >= max_execute_turns - 1 or quick_forced_answer_active)
+                and (
+                    turn >= effective_execute_turns - 1
+                    or quick_forced_answer_active
+                )
             )
         )
 
@@ -2218,7 +2261,7 @@ async def _run_execute_phase(
             if continuing_final_answer
             else _budget_tail(
                 turn=turn,
-                limit=max_execute_turns,
+                limit=effective_execute_turns,
                 mode=options.mode,
                 force_final_answer=force_final_answer,
             )
@@ -2247,7 +2290,7 @@ async def _run_execute_phase(
         thinking_payload = {
             "round": max_execute_turns
             if quick_forced_answer_active else turn + 1,
-            "limit": max_execute_turns,
+            "limit": effective_execute_turns,
             "hard_limit": hard_execute_turns,
             "final_continuation": continuing_final_answer,
             "mode": options.mode,
@@ -2289,7 +2332,10 @@ async def _run_execute_phase(
             messages=loop_messages,
             max_tokens=settings.agent_execute_max_tokens,
             tools=request_tools,
-            tool_choice="none" if tools_disabled else "auto",
+            # Keep provider cache-affecting request parameters stable across
+            # execute rounds. Finalization calls are rejected below and never
+            # reach the tool dispatcher.
+            tool_choice="auto" if tools_supported else "none",
             json_schema=None,
             cache_breakpoints=[0] if prefix_messages else [],
             temperature=0.3,
@@ -2385,6 +2431,9 @@ async def _run_execute_phase(
 
         if resp.tool_calls and not tools_disabled:
             tool_calls_seen = True
+            has_malformed_tool_arguments = any(
+                tc.parse_error is not None for tc in resp.tool_calls
+            )
             assistant_blocks: list = []
             if resp.text:
                 assistant_blocks.append(TextBlock(text=resp.text))
@@ -2403,6 +2452,7 @@ async def _run_execute_phase(
                 result_blocks=tool_result_blocks,
                 guard=guard,
                 stats=dispatch_stats,
+                turn=turn,
             ):
                 yield ev
             messages.append(ChatMessage(role="tool", content=tool_result_blocks))
@@ -2412,7 +2462,18 @@ async def _run_execute_phase(
                     manifest=dispatch_stats.citation_manifest,
                 )
                 continue
-            if turn + 1 >= max_execute_turns - 1:
+            if (
+                has_malformed_tool_arguments
+                and malformed_tool_argument_repairs
+                < MALFORMED_TOOL_ARGUMENT_REPAIR_LIMIT
+            ):
+                malformed_tool_argument_repairs += 1
+                messages.append(ChatMessage(
+                    role="user",
+                    content=MALFORMED_TOOL_ARGUMENT_NUDGE,
+                ))
+                continue
+            if turn + 1 >= effective_execute_turns - 1:
                 upgraded, previous_limit = _try_upgrade_budget(
                     budget_state,
                     guard=guard,
@@ -2748,6 +2809,11 @@ def _budget_tail(
     return base
 
 
+def _public_tool_call_id(*, turn: int, tool_index: int) -> str:
+    """Replay-stable correlation id that does not expose provider ids."""
+    return f"turn-{turn + 1}-tool-{tool_index + 1}"
+
+
 async def _persist_tool_call(
     *,
     conversation_id: str,
@@ -2756,6 +2822,9 @@ async def _persist_tool_call(
     result: Any,
     error: str | None,
     duration_ms: int,
+    tool_call_id: str | None = None,
+    tool_index: int | None = None,
+    turn: int | None = None,
 ) -> None:
     """Persist one tool_call row in its own transaction. Used by all four
     dispatch paths (unknown / exception / success / dedup-skipped)."""
@@ -2768,6 +2837,9 @@ async def _persist_tool_call(
             result=result,
             error=error,
             duration_ms=duration_ms,
+            tool_call_id=tool_call_id,
+            tool_index=tool_index,
+            turn=turn,
         )
         await db.commit()
 
@@ -2832,6 +2904,7 @@ async def _dispatch_tool_calls(
     result_blocks: list[ToolResultBlock],
     guard: _CallGuard,
     stats: _DispatchStats | None = None,
+    turn: int = 0,
 ) -> AsyncIterator[AgentEvent]:
     """Preflight + parallel execution + completion-order drain.
 
@@ -2858,9 +2931,13 @@ async def _dispatch_tool_calls(
         the last ToolResultBlock of *this* tool message.
     """
     n = len(tool_calls)
+    public_ids = [
+        _public_tool_call_id(turn=turn, tool_index=idx)
+        for idx in range(n)
+    ]
     placeholders: list[ToolResultBlock | None] = [None] * n
     keys: list[str] = []
-    statuses: list[str] = []  # runnable | duplicate | unknown | preflight_error
+    statuses: list[str] = []  # runnable | duplicate | unknown | malformed | preflight_error
     leader_followers: dict[int, list[int]] = {}
     seen_in_batch: dict[str, int] = {}
     nudge_pending = False
@@ -2941,7 +3018,9 @@ async def _dispatch_tool_calls(
         yield AgentEvent(
             event_type="tool_call",
             data=json.dumps({
-                "tool_call_id": tc.id,
+                "tool_call_id": public_ids[idx],
+                "tool_index": idx,
+                "turn": turn,
                 "name": tc.name,
                 "arguments": tc.arguments,
                 "display": display,
@@ -2954,6 +3033,10 @@ async def _dispatch_tool_calls(
 
         key = guard.key(tc.name, tc.arguments)
         keys.append(key)
+
+        if getattr(tc, "parse_error", None) is not None:
+            statuses.append("malformed")
+            continue
 
         preflight_error = _finish_research_preflight(tc, prior_tool_calls)
         finish_manifest: list[dict[str, Any]] = []
@@ -3007,10 +3090,23 @@ async def _dispatch_tool_calls(
                     f"prior result.\n{prior}"
                 ),
             )
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=tc.name,
+                arguments=tc.arguments,
+                result={"deduped": True, "preview": prior_preview},
+                error=None,
+                duration_ms=0,
+                tool_call_id=public_ids[idx],
+                tool_index=idx,
+                turn=turn,
+            )
             yield AgentEvent(
                 event_type="tool_result",
                 data=json.dumps({
-                    "tool_call_id": tc.id,
+                    "tool_call_id": public_ids[idx],
+                    "tool_index": idx,
+                    "turn": turn,
                     "name": tc.name, "ok": True, "deduped": True,
                     "preview": prior_preview[:TOOL_RESULT_PREVIEW_LEN],
                 }, ensure_ascii=False),
@@ -3021,6 +3117,7 @@ async def _dispatch_tool_calls(
                 conversation_id=conversation_id,
                 name=tc.name, arguments=tc.arguments,
                 result=None, error=err, duration_ms=0,
+                tool_call_id=public_ids[idx], tool_index=idx, turn=turn,
             )
             placeholders[idx] = ToolResultBlock(
                 tool_call_id=tc.id,
@@ -3031,8 +3128,50 @@ async def _dispatch_tool_calls(
             yield AgentEvent(
                 event_type="tool_result",
                 data=json.dumps({
-                    "tool_call_id": tc.id,
+                    "tool_call_id": public_ids[idx],
+                    "tool_index": idx,
+                    "turn": turn,
                     "name": tc.name, "ok": False, "error": err,
+                }, ensure_ascii=False),
+            )
+        elif s == "malformed":
+            err = f"could not parse tool arguments: {getattr(tc, 'parse_error', None)}"
+            result = {
+                "error": err,
+                "retryable": True,
+                "correction": (
+                    "Retry this tool call with one complete JSON object matching "
+                    "the tool schema. Do not wrap arguments in a Markdown code fence."
+                ),
+            }
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=tc.name,
+                arguments=tc.arguments,
+                result=result,
+                error=err,
+                duration_ms=0,
+                tool_call_id=public_ids[idx],
+                tool_index=idx,
+                turn=turn,
+            )
+            result_text = json.dumps(result, ensure_ascii=False)
+            placeholders[idx] = ToolResultBlock(
+                tool_call_id=tc.id,
+                content=result_text,
+                is_error=True,
+            )
+            guard.remember(key, result_text, preview=err)
+            yield AgentEvent(
+                event_type="tool_result",
+                data=json.dumps({
+                    "tool_call_id": public_ids[idx],
+                    "tool_index": idx,
+                    "turn": turn,
+                    "name": tc.name,
+                    "ok": False,
+                    "error": err,
+                    "retryable": True,
                 }, ensure_ascii=False),
             )
         elif s == "preflight_error":
@@ -3045,6 +3184,9 @@ async def _dispatch_tool_calls(
                 result=result,
                 error=err,
                 duration_ms=0,
+                tool_call_id=public_ids[idx],
+                tool_index=idx,
+                turn=turn,
             )
             result_text = json.dumps(result, ensure_ascii=False)
             placeholders[idx] = ToolResultBlock(
@@ -3056,7 +3198,9 @@ async def _dispatch_tool_calls(
             yield AgentEvent(
                 event_type="tool_result",
                 data=json.dumps({
-                    "tool_call_id": tc.id,
+                    "tool_call_id": public_ids[idx],
+                    "tool_index": idx,
+                    "turn": turn,
                     "name": tc.name,
                     "ok": False,
                     "error": err,
@@ -3127,6 +3271,7 @@ async def _dispatch_tool_calls(
                         conversation_id=conversation_id,
                         name=tc.name, arguments=tc.arguments,
                         result=None, error=err, duration_ms=duration_ms,
+                        tool_call_id=public_ids[idx], tool_index=idx, turn=turn,
                     )
                     placeholders[idx] = ToolResultBlock(
                         tool_call_id=tc.id,
@@ -3137,7 +3282,9 @@ async def _dispatch_tool_calls(
                     yield AgentEvent(
                         event_type="tool_result",
                         data=json.dumps({
-                            "tool_call_id": tc.id,
+                            "tool_call_id": public_ids[idx],
+                            "tool_index": idx,
+                            "turn": turn,
                             "name": tc.name, "ok": False, "error": err,
                             "duration_ms": duration_ms,
                         }, ensure_ascii=False),
@@ -3154,10 +3301,23 @@ async def _dispatch_tool_calls(
                             ),
                             is_error=True,
                         )
+                        await _persist_tool_call(
+                            conversation_id=conversation_id,
+                            name=ftc.name,
+                            arguments=ftc.arguments,
+                            result={"deduped": True},
+                            error=err,
+                            duration_ms=duration_ms,
+                            tool_call_id=public_ids[fidx],
+                            tool_index=fidx,
+                            turn=turn,
+                        )
                         yield AgentEvent(
                             event_type="tool_result",
                             data=json.dumps({
-                                "tool_call_id": ftc.id,
+                                "tool_call_id": public_ids[fidx],
+                                "tool_index": fidx,
+                                "turn": turn,
                                 "name": ftc.name, "ok": False,
                                 "deduped": True, "error": err,
                             }, ensure_ascii=False),
@@ -3235,12 +3395,15 @@ async def _dispatch_tool_calls(
                     name=tc.name, arguments=tc.arguments,
                     result=result, error=None,
                     duration_ms=duration_ms,
+                    tool_call_id=public_ids[idx], tool_index=idx, turn=turn,
                 )
                 if user_only is not None:
                     yield AgentEvent(
                         event_type="user_artifact",
                         data=json.dumps({
-                            "tool_call_id": tc.id,
+                            "tool_call_id": public_ids[idx],
+                            "tool_index": idx,
+                            "turn": turn,
                             "tool": tc.name,
                             "payload": user_only,
                         }, ensure_ascii=False),
@@ -3259,7 +3422,9 @@ async def _dispatch_tool_calls(
                 yield AgentEvent(
                     event_type="tool_result",
                     data=json.dumps({
-                        "tool_call_id": tc.id,
+                        "tool_call_id": public_ids[idx],
+                        "tool_index": idx,
+                        "turn": turn,
                         "name": tc.name, "ok": True, "preview": preview,
                         "duration_ms": duration_ms,
                     }, ensure_ascii=False),
@@ -3274,10 +3439,23 @@ async def _dispatch_tool_calls(
                             f"reusing leader's result.\n{result_text}"
                         ),
                     )
+                    await _persist_tool_call(
+                        conversation_id=conversation_id,
+                        name=ftc.name,
+                        arguments=ftc.arguments,
+                        result={"deduped": True, "preview": preview},
+                        error=None,
+                        duration_ms=duration_ms,
+                        tool_call_id=public_ids[fidx],
+                        tool_index=fidx,
+                        turn=turn,
+                    )
                     yield AgentEvent(
                         event_type="tool_result",
                         data=json.dumps({
-                            "tool_call_id": ftc.id,
+                            "tool_call_id": public_ids[fidx],
+                            "tool_index": fidx,
+                            "turn": turn,
                             "name": ftc.name, "ok": True,
                             "deduped": True,
                             "preview": preview[:TOOL_RESULT_PREVIEW_LEN],
@@ -3305,6 +3483,9 @@ async def _dispatch_tool_calls(
             result=None,
             error=err,
             duration_ms=0,
+            tool_call_id=public_ids[idx],
+            tool_index=idx,
+            turn=turn,
         )
         placeholders[idx] = ToolResultBlock(
             tool_call_id=tc.id,
@@ -3315,7 +3496,9 @@ async def _dispatch_tool_calls(
         yield AgentEvent(
             event_type="tool_result",
             data=json.dumps({
-                "tool_call_id": tc.id,
+                "tool_call_id": public_ids[idx],
+                "tool_index": idx,
+                "turn": turn,
                 "name": tc.name,
                 "ok": False,
                 "error": err,
@@ -3332,10 +3515,23 @@ async def _dispatch_tool_calls(
                 ),
                 is_error=True,
             )
+            await _persist_tool_call(
+                conversation_id=conversation_id,
+                name=follower.name,
+                arguments=follower.arguments,
+                result={"deduped": True, "not_started": True},
+                error=err,
+                duration_ms=0,
+                tool_call_id=public_ids[follower_idx],
+                tool_index=follower_idx,
+                turn=turn,
+            )
             yield AgentEvent(
                 event_type="tool_result",
                 data=json.dumps({
-                    "tool_call_id": follower.id,
+                    "tool_call_id": public_ids[follower_idx],
+                    "tool_index": follower_idx,
+                    "turn": turn,
                     "name": follower.name,
                     "ok": False,
                     "deduped": True,

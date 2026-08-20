@@ -39,9 +39,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -50,10 +51,12 @@ from marginalia.agent.runtime import run_turn
 from marginalia.agent.tool_locks import session_execution_lock
 from marginalia.agent.types import AgentTurnError, ChatMode, RunOptions
 from marginalia.config import get_settings
+from marginalia.capacity import CapacityExceeded, enforce_chat_concurrency
 from marginalia.llm import ImageBlock
-from marginalia.db.models import Session as SessionRow
+from marginalia.db.models import Conversation, Session as SessionRow
 from marginalia.db.session import get_session, session_scope
 from marginalia.repositories import sessions as session_service
+from marginalia.repositories import agent_events as agent_events_repo
 from marginalia.repositories.task_outcomes import record_outcome
 
 router = APIRouter(tags=["chat"])
@@ -61,6 +64,9 @@ log = logging.getLogger(__name__)
 
 
 _SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+_CHAT_CAPACITY_LOCK = asyncio.Lock()
+_BACKGROUND_TURNS: set[asyncio.Task[None]] = set()
+_ACTIVE_TURNS: dict[str, asyncio.Task[None]] = {}
 CLIENT_STOPPED_MESSAGE = "Chat turn was stopped by the client."
 
 
@@ -223,76 +229,271 @@ async def post_chat(
     # error frame the browser would surface as a "successful" stream.
     images = _validate_chat_images(body.images)
 
-    user_message = body.query
+    settings = get_settings()
+    stale_seconds = (
+        settings.agent_turn_timeout_seconds
+        if settings.agent_turn_timeout_seconds > 0
+        else 86_400.0
+    )
+    conversation_ready: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    def start_background(*, capacity_reserved: bool) -> asyncio.Task[None]:
+        task = asyncio.create_task(
+            _run_durable_turn(
+                session_id=session_id,
+                user_message=body.query,
+                images=images,
+                mode=body.mode,
+                conversation_ready=conversation_ready,
+                capacity_reserved=capacity_reserved,
+            ),
+            name=f"chat-turn:{session_id}",
+        )
+        _BACKGROUND_TURNS.add(task)
+        task.add_done_callback(_BACKGROUND_TURNS.discard)
+        return task
+
+    if settings.chat_concurrency_limit > 0:
+        # Hold the local lock and PostgreSQL transaction advisory lock until
+        # the reserved conversation has been created. This makes rejection a
+        # real HTTP 429, rather than an error frame after SSE headers were sent.
+        async with _CHAT_CAPACITY_LOCK:
+            await enforce_chat_concurrency(
+                db,
+                limit=settings.chat_concurrency_limit,
+                stale_before=datetime.now(timezone.utc) - timedelta(
+                    seconds=max(300.0, stale_seconds)
+                ),
+            )
+            task = start_background(capacity_reserved=True)
+            try:
+                await asyncio.shield(conversation_ready)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                if not task.done():
+                    task.cancel()
+                raise
+    else:
+        start_background(capacity_reserved=False)
 
     async def event_stream() -> AsyncIterator[dict[str, str]]:
-        # Hold the lock for the WHOLE turn — plan + execute + finalize
-        # all touch shared per-session state (conversation rows, journal
-        # via reflect, session-level counters). Releasing earlier would
-        # let a concurrent request see partial state.
+        try:
+            conversation_id = await asyncio.shield(conversation_ready)
+        except Exception as exc:
+            yield {"event": "error", "data": str(exc)}
+            return
+        async for frame in _replay_frames(
+            conversation_id=conversation_id,
+            after_cursor=0,
+        ):
+            yield frame
+
+    return EventSourceResponse(
+        event_stream(),
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _persist_event(
+    *,
+    conversation_id: str,
+    event: str,
+    data: str,
+) -> None:
+    async with session_scope() as db:
+        await agent_events_repo.append(
+            db,
+            conversation_id=conversation_id,
+            event=event,
+            data=data,
+        )
+        await db.commit()
+
+
+async def _run_durable_turn(
+    *,
+    session_id: str,
+    user_message: str,
+    images: list[ImageBlock],
+    mode: ChatMode,
+    conversation_ready: asyncio.Future[str],
+    capacity_reserved: bool = False,
+) -> None:
+    """Run independently from the attached SSE response and persist progress."""
+    conversation_id: str | None = None
+    timeout_seconds = get_settings().agent_turn_timeout_seconds
+
+    async def execute() -> None:
+        nonlocal conversation_id
         async with _turn_lock(session_id):
-            conversation_id: str | None = None
-            timeout_seconds = get_settings().agent_turn_timeout_seconds
-            try:
-                async def forward() -> AsyncIterator[dict[str, str]]:
-                    nonlocal conversation_id
-                    async for ev in run_turn(
-                        session_id=session_id,
-                        user_message=user_message,
-                        images=images,
-                        options=RunOptions(mode=body.mode),
-                    ):
-                        if ev.event_type == "conversation" and ev.data:
-                            conversation_id = ev.data
-                        yield {"event": ev.event_type, "data": ev.data}
+            async for ev in run_turn(
+                session_id=session_id,
+                user_message=user_message,
+                images=images,
+                options=RunOptions(mode=mode),
+                capacity_reserved=capacity_reserved,
+            ):
+                if ev.event_type == "conversation" and ev.data:
+                    conversation_id = ev.data
+                    _ACTIVE_TURNS[conversation_id] = asyncio.current_task()  # type: ignore[assignment]
+                if conversation_id is None:
+                    continue
+                await _persist_event(
+                    conversation_id=conversation_id,
+                    event=ev.event_type,
+                    data=ev.data,
+                )
+                if not conversation_ready.done():
+                    conversation_ready.set_result(conversation_id)
 
-                if timeout_seconds > 0:
-                    async with asyncio.timeout(timeout_seconds):
-                        async for frame in forward():
-                            yield frame
-                else:
-                    async for frame in forward():
-                        yield frame
-            except TimeoutError:
-                msg = _timeout_message(timeout_seconds)
-                await _finish_interrupted_turn(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    reason="timeout",
-                    message=msg,
-                    fallback_to_latest=True,
-                )
-                yield {"event": "error", "data": msg}
-            except asyncio.CancelledError:
-                await asyncio.shield(
-                    _finish_interrupted_turn(
-                        session_id=session_id,
-                        conversation_id=conversation_id,
-                        reason="client_cancelled",
-                        message=CLIENT_STOPPED_MESSAGE,
-                        fallback_to_latest=True,
-                    )
-                )
-                raise
-            except AgentTurnError as exc:
-                msg = str(exc)
-                await _finish_interrupted_turn(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    reason="agent_error",
-                    message=msg,
-                )
-                yield {"event": "error", "data": msg}
-            except Exception as exc:
-                log.exception("chat turn failed for session %s", session_id)
-                msg = str(exc)
-                await _finish_interrupted_turn(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    reason="exception",
-                    message=msg,
-                    fallback_to_latest=True,
-                )
-                yield {"event": "error", "data": msg}
+    try:
+        if timeout_seconds > 0:
+            async with asyncio.timeout(timeout_seconds):
+                await execute()
+        else:
+            await execute()
+    except TimeoutError:
+        message = _timeout_message(timeout_seconds)
+        await _finish_interrupted_turn(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            reason="timeout",
+            message=message,
+            fallback_to_latest=True,
+        )
+        if conversation_id is not None:
+            await _persist_event(
+                conversation_id=conversation_id, event="error", data=message
+            )
+    except asyncio.CancelledError:
+        await asyncio.shield(_finish_interrupted_turn(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            reason="client_cancelled",
+            message=CLIENT_STOPPED_MESSAGE,
+            fallback_to_latest=True,
+        ))
+        if conversation_id is not None:
+            await asyncio.shield(_persist_event(
+                conversation_id=conversation_id,
+                event="error",
+                data=CLIENT_STOPPED_MESSAGE,
+            ))
+    except AgentTurnError as exc:
+        message = str(exc)
+        await _finish_interrupted_turn(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            reason="agent_error",
+            message=message,
+        )
+        if conversation_id is not None:
+            await _persist_event(
+                conversation_id=conversation_id, event="error", data=message
+            )
+        elif not conversation_ready.done():
+            conversation_ready.set_exception(exc)
+    except CapacityExceeded as exc:
+        if not conversation_ready.done():
+            conversation_ready.set_exception(exc)
+    except Exception as exc:
+        log.exception("chat turn failed for session %s", session_id)
+        message = str(exc)
+        await _finish_interrupted_turn(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            reason="exception",
+            message=message,
+            fallback_to_latest=True,
+        )
+        if conversation_id is not None:
+            await _persist_event(
+                conversation_id=conversation_id, event="error", data=message
+            )
+        elif not conversation_ready.done():
+            conversation_ready.set_exception(exc)
+    finally:
+        if conversation_id is not None:
+            _ACTIVE_TURNS.pop(conversation_id, None)
+        if not conversation_ready.done():
+            conversation_ready.set_exception(
+                AgentTurnError("chat turn ended before a conversation was created")
+            )
 
-    return EventSourceResponse(event_stream())
+
+async def _replay_frames(
+    *,
+    conversation_id: str,
+    after_cursor: int,
+) -> AsyncIterator[dict[str, str]]:
+    cursor = max(0, int(after_cursor))
+    idle_after_terminal = 0
+    while True:
+        async with session_scope() as db:
+            rows = await agent_events_repo.list_after(
+                db,
+                conversation_id=conversation_id,
+                after_cursor=cursor,
+            )
+            conversation = await db.get(Conversation, conversation_id)
+            terminal = conversation is None or conversation.ended_at is not None
+            latest_event = await agent_events_repo.latest_event_name(
+                db, conversation_id=conversation_id,
+            )
+        for row in rows:
+            cursor = row.cursor
+            yield {
+                "event": row.event,
+                "data": row.data,
+                "id": str(row.cursor),
+            }
+        if terminal and latest_event in {"done", "error"} and not rows:
+            return
+        if terminal and latest_event is None and not rows:
+            return
+        if terminal and not rows:
+            idle_after_terminal += 1
+            # A final conversation commit happens just before the terminal
+            # public event is written in its own transaction. Allow that write
+            # to catch up; only use the bounded fallback for legacy or damaged
+            # turns that genuinely have no terminal ledger row.
+            if idle_after_terminal >= 20:
+                return
+        else:
+            idle_after_terminal = 0
+        await asyncio.sleep(0.1)
+
+
+@router.get("/conversations/{conversation_id}/events")
+async def resume_chat_events(
+    conversation_id: str,
+    after_cursor: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    db: AsyncSession = Depends(get_session),
+) -> EventSourceResponse:
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    cursor = after_cursor
+    if last_event_id and last_event_id.isdigit():
+        cursor = max(cursor, int(last_event_id))
+    return EventSourceResponse(
+        _replay_frames(conversation_id=conversation_id, after_cursor=cursor),
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/conversations/{conversation_id}/cancel", status_code=202)
+async def cancel_chat_turn(
+    conversation_id: str,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    task = _ACTIVE_TURNS.get(conversation_id)
+    if task is None or task.done():
+        return {"conversation_id": conversation_id, "cancelled": False}
+    task.cancel()
+    return {"conversation_id": conversation_id, "cancelled": True}

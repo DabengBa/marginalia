@@ -38,6 +38,7 @@ class Task(Base, IdMixin):
         Index("ix_tasks_status_lease", "status", "lease_expires_at"),
         Index("ix_tasks_kind_status_finished", "kind", "status", "finished_at"),
         Index("ix_tasks_status_finished", "status", "finished_at"),
+        Index("ix_tasks_status_finished_id", "status", "finished_at", "id"),
         CheckConstraint(_in_clause("status", TASK_STATUSES), name="status"),
     )
 

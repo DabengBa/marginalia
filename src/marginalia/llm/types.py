@@ -88,6 +88,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    parse_error: str | None = None
 
 
 # ---- request / response -----------------------------------------------------

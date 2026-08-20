@@ -4,7 +4,7 @@ Caller owns the transaction.
 """
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryTag, Tag
@@ -123,6 +123,96 @@ async def list_live_entry_tag_pairs(
     return [(e, t) for e, t in rows]
 
 
+async def list_live_entry_ids_page(
+    db: AsyncSession,
+    *,
+    after_entry_id: str | None,
+    limit: int,
+) -> list[str]:
+    """A keyset page of live entry ids used by bounded relation mining."""
+    from marginalia.db.models import FileEntry
+
+    stmt = select(FileEntry.id).where(FileEntry.deleted_at.is_(None))
+    if after_entry_id is not None:
+        stmt = stmt.where(FileEntry.id > after_entry_id)
+    rows = (
+        await db.execute(
+            stmt.order_by(FileEntry.id.asc()).limit(max(1, int(limit)))
+        )
+    ).scalars().all()
+    return [str(row) for row in rows]
+
+
+async def list_distinct_tag_ids_for_entries(
+    db: AsyncSession,
+    entry_ids: list[str],
+) -> list[str]:
+    if not entry_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(EntryTag.tag_id)
+            .where(EntryTag.entry_id.in_(entry_ids))
+            .distinct()
+        )
+    ).scalars().all()
+    return [str(row) for row in rows]
+
+
+async def list_eligible_live_tag_ids(
+    db: AsyncSession,
+    *,
+    tag_ids: list[str],
+    max_fanout: int,
+    limit: int,
+) -> list[str]:
+    """Tags with a bounded live fan-out, returning at most ``limit`` rows."""
+    from marginalia.db.models import FileEntry
+
+    if not tag_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(EntryTag.tag_id)
+            .join(FileEntry, FileEntry.id == EntryTag.entry_id)
+            .where(
+                EntryTag.tag_id.in_(tag_ids),
+                FileEntry.deleted_at.is_(None),
+            )
+            .group_by(EntryTag.tag_id)
+            .having(
+                func.count(func.distinct(EntryTag.entry_id)).between(
+                    2, max(2, int(max_fanout)),
+                )
+            )
+            .order_by(EntryTag.tag_id.asc())
+            .limit(max(1, int(limit)))
+        )
+    ).scalars().all()
+    return [str(row) for row in rows]
+
+
+async def list_live_pairs_for_tags(
+    db: AsyncSession,
+    tag_ids: list[str],
+) -> list[tuple[str, str]]:
+    from marginalia.db.models import FileEntry
+
+    if not tag_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(EntryTag.entry_id, EntryTag.tag_id)
+            .join(FileEntry, FileEntry.id == EntryTag.entry_id)
+            .where(
+                EntryTag.tag_id.in_(tag_ids),
+                FileEntry.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    return [(str(entry_id), str(tag_id)) for entry_id, tag_id in rows]
+
+
 async def list_live_active_entry_tag_pairs(
     db: AsyncSession,
 ) -> list[tuple[str, str]]:
@@ -171,4 +261,3 @@ async def delete_all_for_entry(
         delete(EntryTag).where(EntryTag.entry_id == entry_id)
     )
     return int(result.rowcount or 0)
-

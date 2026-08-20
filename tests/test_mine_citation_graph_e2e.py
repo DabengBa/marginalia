@@ -38,7 +38,7 @@ os.environ["WORKER_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
 os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
 
 from marginalia.config import get_settings  # noqa: E402
 
@@ -252,6 +252,25 @@ async def _main() -> None:
     assert ab_again.observation_count > before, \
         f"second run should increment again, got {ab_again.observation_count}"
     print(f"[5] re-run is cumulative (obs={ab_again.observation_count})")
+
+    await handle_mine_citation_graph({
+        "activity_limit": 1,
+        "candidate_limit": 1,
+        "min_citations": 1,
+    })
+    async with factory() as s:
+        detail = (await s.execute(text(
+            "SELECT detail FROM task_outcomes "
+            "WHERE task_kind='mine_citation_graph' "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1"
+        ))).scalar_one()
+        if isinstance(detail, str):
+            import json as _j
+            detail = _j.loads(detail)
+        assert detail["messages_scanned"] == 1
+        assert detail["scan_truncated"] is True
+        assert detail["candidate_pairs"] <= 1
+        assert detail["candidate_pairs_truncated"] is True
 
     print("\nALL MINE_CITATION_GRAPH E2E CHECKS PASSED")
 

@@ -33,6 +33,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryTag, File, FileEntry
+from marginalia.capacity import enforce_upload_capacity
+from marginalia.config import get_settings
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
@@ -315,6 +317,16 @@ async def upload(
                     auto_renamed=auto_renamed,
                     now=now,
                 )
+
+        # Check only genuinely new physical files. The transaction-scoped
+        # PostgreSQL lock keeps this check and the following INSERT atomic
+        # across API replicas; the upload compensation path removes the
+        # already-written object when a limit is exceeded.
+        await enforce_upload_capacity(
+            session,
+            incoming_bytes=size,
+            settings=get_settings(),
+        )
 
         return await _create_new_file_entry(
             session,

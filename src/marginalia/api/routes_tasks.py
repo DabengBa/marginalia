@@ -16,12 +16,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Task
 from marginalia.db.session import get_session
+from marginalia.api.pagination import decode_desc_cursor, encode_desc_cursor
 from marginalia.repositories import tasks as tasks_repo
 
 router = APIRouter(tags=["tasks"])
@@ -101,14 +102,21 @@ async def list_active(
 @router.get("/tasks/recent")
 async def list_recent(
     db: AsyncSession = Depends(get_session),
-    limit: int = 30,
-) -> dict[str, list[dict]]:
+    limit: int = Query(default=30, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+) -> dict[str, Any]:
     """Recently-finished tasks (done + dead), newest first, with the
     per-run usage detail captured by the runner. Powers the StatusBar
     Activity popover so users can see how long ingest / reflect / embed
     took and how many tokens each call burned."""
     from marginalia.repositories import tasks as tasks_repo
-    rows = await tasks_repo.list_recent_with_usage(db, limit=limit)
+    before = decode_desc_cursor(cursor) if cursor is not None else None
+    fetched = await tasks_repo.list_recent_with_usage(
+        db,
+        limit=limit + 1,
+        before=before,
+    )
+    rows = fetched[:limit]
 
     def _row(r: dict) -> dict:
         payload = r["payload"] or {}
@@ -137,7 +145,12 @@ async def list_recent(
             "stages_ms": detail.get("stages_ms") or {},
         }
 
-    return {"items": [_row(r) for r in rows]}
+    next_cursor = (
+        encode_desc_cursor(rows[-1]["finished_at"], rows[-1]["id"])
+        if len(fetched) > limit and rows and rows[-1]["finished_at"] is not None
+        else None
+    )
+    return {"items": [_row(r) for r in rows], "next_cursor": next_cursor}
 
 
 @router.get("/tasks/throughput")

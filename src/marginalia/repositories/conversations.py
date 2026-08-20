@@ -26,17 +26,20 @@ async def latest_ended(db: AsyncSession) -> Conversation | None:
 
 
 async def list_agent_responses_since(
-    db: AsyncSession, cutoff: datetime,
+    db: AsyncSession, cutoff: datetime, *, limit: int | None = None,
 ) -> list[str]:
     """Non-null `agent_response` strings for conversations started at or
     after `cutoff`. Used by mine_citation_graph to extract per-turn citation
     co-occurrences."""
-    rows = (
-        await db.execute(
-            select(Conversation.agent_response).where(
-                Conversation.agent_response.is_not(None),
-                Conversation.started_at >= cutoff,
-            )
+    stmt = (
+        select(Conversation.agent_response)
+        .where(
+            Conversation.agent_response.is_not(None),
+            Conversation.started_at >= cutoff,
         )
-    ).scalars().all()
+        .order_by(Conversation.started_at.desc(), Conversation.id.desc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(max(1, int(limit)))
+    rows = (await db.execute(stmt)).scalars().all()
     return [r for r in rows if r is not None]

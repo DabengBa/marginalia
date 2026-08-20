@@ -32,6 +32,10 @@ class LocalStorage(StorageBackend):
             ) from exc
         return candidate
 
+    async def check_ready(self) -> None:
+        if not self.root.is_dir() or not os.access(self.root, os.R_OK | os.W_OK):
+            raise OSError(f"storage root is not readable and writable: {self.root}")
+
     async def put(
         self,
         key: str,

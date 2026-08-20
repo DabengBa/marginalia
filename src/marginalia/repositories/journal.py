@@ -321,15 +321,18 @@ async def list_id_entry_ids_note_created(
 
 
 async def list_entry_id_arrays_since(
-    db: AsyncSession, cutoff: datetime,
+    db: AsyncSession, cutoff: datetime, *, limit: int | None = None,
 ) -> list[list]:
     """All `entry_ids` arrays from journal rows newer than `cutoff`. Used by
     suggest_lifecycle to compute "entries mentioned recently" without
     pulling other columns, and by mine_session_cooccurrence."""
-    rows = (
-        await db.execute(
-            select(Journal.entry_ids).where(Journal.created_at >= cutoff)
-            .where(Journal.invalidated_at.is_(None))
-        )
-    ).scalars().all()
+    stmt = (
+        select(Journal.entry_ids)
+        .where(Journal.created_at >= cutoff)
+        .where(Journal.invalidated_at.is_(None))
+        .order_by(Journal.created_at.desc(), Journal.id.desc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(max(1, int(limit)))
+    rows = (await db.execute(stmt)).scalars().all()
     return [list(r or []) for r in rows]

@@ -21,7 +21,7 @@ autogenerate / Base.metadata.create_all picks them all up.
 
 from marginalia.db.models.base import Base
 from marginalia.db.models.user_visible import File, FileEntry, Folder
-from marginalia.db.models.audit import AuditEvent, Conversation, Session
+from marginalia.db.models.audit import AgentEvent, AuditEvent, Conversation, Session
 from marginalia.db.models.ai_structural import (
     Catalog,
     EntryTag,
@@ -35,6 +35,7 @@ from marginalia.db.models.tasks import Task
 
 __all__ = [
     "AuditEvent",
+    "AgentEvent",
     "Base",
     "Catalog",
     "Conversation",

@@ -39,7 +39,7 @@ os.environ["WORKER_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
 os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
 
 from marginalia.config import get_settings  # noqa: E402
 
@@ -277,6 +277,26 @@ async def _main() -> None:
         f"second run should increment again, got {ab_again.observation_count}"
     print(f"[7] re-run is idempotent + cumulative "
           f"(obs_count={ab_again.observation_count})")
+
+    await handle_mine_tag_overlap({
+        "entry_page_size": 2,
+        "eligible_tag_limit": 1,
+        "candidate_limit": 1,
+    })
+    async with factory() as s:
+        detail = (await s.execute(text(
+            "SELECT detail FROM task_outcomes "
+            "WHERE task_kind='mine_tag_overlap' "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1"
+        ))).scalar_one()
+        if isinstance(detail, str):
+            import json as _j
+            detail = _j.loads(detail)
+        assert detail["entries_scanned"] == 2
+        assert detail["cycle_complete"] is False
+        assert detail["next_entry_id"]
+        assert detail["eligible_tags"] <= 1
+        assert detail["candidates_considered"] <= 1
 
     print("\nALL MINE_TAG_OVERLAP E2E CHECKS PASSED")
 

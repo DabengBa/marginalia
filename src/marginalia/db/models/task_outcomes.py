@@ -51,6 +51,7 @@ class TaskOutcome(Base, IdMixin):
         ),
         Index("ix_task_outcomes_recency", "task_kind", "completed_at"),
         Index("ix_task_outcomes_completed_at", "completed_at"),
+        Index("ix_task_outcomes_completed_id", "completed_at", "id"),
     )
 
     task_kind: Mapped[str] = mapped_column(String(64), nullable=False)
