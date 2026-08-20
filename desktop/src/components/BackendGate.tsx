@@ -19,7 +19,13 @@
  *  error screen with the log path plus Retry / Quit actions. */
 import { useEffect, useRef, useState } from "react";
 
-import { health, resetResolvedBaseUrl, resolveTauriBaseUrl } from "@/api/client";
+import {
+  clearBaseUrlOverride,
+  getBaseUrlOverride,
+  health,
+  resetResolvedBaseUrl,
+  resolveTauriBaseUrl,
+} from "@/api/client";
 import { useI18n } from "@/lib/i18n";
 import { frontendLog, getTauriLogDir } from "@/lib/frontendLog";
 
@@ -197,6 +203,7 @@ export function BackendGate({ children }: Props) {
   }
 
   const stale = waitedMs >= STALE_THRESHOLD_MS;
+  const baseUrlOverride = getBaseUrlOverride();
   return (
     <div className="flex h-full w-full items-center justify-center bg-bg-base text-fg-base">
       <div className="max-w-md text-center">
@@ -217,6 +224,27 @@ export function BackendGate({ children }: Props) {
             </p>
             {lastError && (
               <p className="font-mono text-[10px] opacity-70">{lastError}</p>
+            )}
+            {isTauri() && baseUrlOverride && (
+              <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-3 text-left">
+                <p className="font-medium text-warning">{t.backend.customBaseTitle}</p>
+                <p className="mt-1 break-all font-mono text-[10px]">{baseUrlOverride}</p>
+                <p className="mt-2">{t.backend.customBaseBody}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearBaseUrlOverride();
+                    setWaitedMs(0);
+                    setLastError(null);
+                    loggedFirstFailure.current = false;
+                    loggedStale.current = false;
+                    setRetryNonce((n) => n + 1);
+                  }}
+                  className="mt-3 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
+                >
+                  {t.backend.useBundled}
+                </button>
+              </div>
             )}
           </div>
         )}

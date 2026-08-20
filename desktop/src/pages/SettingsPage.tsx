@@ -15,10 +15,11 @@ import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
 
 import {
+  clearBaseUrlOverride,
+  probeBackendBaseUrl,
   setApiToken,
   setBaseUrl,
   getApiToken,
-  getBaseUrl,
   settings as settingsApi,
   webdavSync,
 } from "@/api/client";
@@ -304,17 +305,35 @@ function missingRequiredProfiles(llm: LlmSettings | null): string[] {
 
 function ConnectionSection() {
   const { t } = useI18n();
-  const [base, setBase] = useState(
-    () => localStorage.getItem(STORAGE_KEY) || getBaseUrl(),
-  );
+  // This field represents only an explicit remote-backend override. Never
+  // expose Tauri's ephemeral bundled-sidecar URL here: saving that runtime
+  // port would make the next app launch point at a dead backend.
+  const [base, setBase] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
   const [token, setToken] = useState(() => getApiToken());
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const save = () => {
+  const save = async () => {
     const v = base.trim().replace(/\/$/, "");
-    if (v) localStorage.setItem(STORAGE_KEY, v);
-    else localStorage.removeItem(STORAGE_KEY);
-    setBaseUrl(v);
+    setSaving(true);
+    setSaveError(null);
+    setSavedAt(null);
+    try {
+      if (v) {
+        await probeBackendBaseUrl(v, token);
+        localStorage.setItem(STORAGE_KEY, v);
+        setBaseUrl(v);
+      } else {
+        clearBaseUrlOverride();
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setSaveError(t.settings.apiBaseValidationFailed(detail));
+      return;
+    } finally {
+      setSaving(false);
+    }
     setApiToken(token);
     setSavedAt(Date.now());
   };
@@ -327,6 +346,7 @@ function ConnectionSection() {
         <span className="mx-1 font-mono">http://host:8000</span>
         {t.settings.apiBaseHelpTail}
       </p>
+      <p className="mt-1 text-xs text-warning">{t.settings.apiBaseModelWarning}</p>
       <div className="mt-3 flex gap-2">
         <input
           value={base}
@@ -335,12 +355,13 @@ function ConnectionSection() {
           className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
         />
         <button
-          onClick={save}
+          onClick={() => void save()}
+          disabled={saving}
           className={cn(
-            "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90",
+            "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50",
           )}
         >
-          <Save size={13} /> {t.common.save}
+          <Save size={13} /> {saving ? t.settings.apiBaseValidating : t.common.save}
         </button>
       </div>
       <label className="mt-4 block text-sm font-medium">{t.settings.apiToken}</label>
@@ -357,6 +378,7 @@ function ConnectionSection() {
           {t.common.saved} · {new Date(savedAt).toLocaleTimeString()}
         </p>
       )}
+      {saveError && <p className="mt-2 text-xs text-danger">{saveError}</p>}
     </Section>
   );
 }

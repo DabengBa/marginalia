@@ -129,6 +129,27 @@ export function resetResolvedBaseUrl(): void {
   _tauriResolved = null;
 }
 
+/** Return the user-saved backend override, if any. This is intentionally
+ * separate from getBaseUrl(): the latter may be the bundled sidecar URL that
+ * Tauri discovered at runtime. */
+export function getBaseUrlOverride(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage?.getItem(STORAGE_KEY)?.trim().replace(/\/$/, "") || "";
+}
+
+/** Remove a broken remote-backend override so Tauri can discover its bundled
+ * sidecar again. BackendGate exposes this recovery path even when the bad
+ * override prevents the Settings page from loading. */
+export function clearBaseUrlOverride(): void {
+  if (typeof window !== "undefined") {
+    window.localStorage?.removeItem(STORAGE_KEY);
+  }
+  _base = import.meta.env.VITE_API_BASE
+    ? String(import.meta.env.VITE_API_BASE).replace(/\/$/, "")
+    : "";
+  _tauriResolved = null;
+}
+
 export function setBaseUrl(url: string) {
   _base = url.replace(/\/$/, "");
 }
@@ -144,6 +165,45 @@ export function setApiToken(token: string) {
 export function getApiToken() {
   if (typeof window === "undefined") return "";
   return window.localStorage?.getItem(TOKEN_STORAGE_KEY) || "";
+}
+
+interface BackendHealth {
+  status: string;
+  storage_backend: string;
+  version?: string;
+}
+
+function isBackendHealth(payload: unknown): payload is BackendHealth {
+  return Boolean(
+    typeof payload === "object" &&
+      payload !== null &&
+      (payload as Record<string, unknown>).status === "ok" &&
+      typeof (payload as Record<string, unknown>).storage_backend === "string",
+  );
+}
+
+/** Verify that a custom GUI API base points to Marginalia itself, rather than
+ * to an Ollama/LM Studio OpenAI-compatible model endpoint. */
+export async function probeBackendBaseUrl(url: string, token = ""): Promise<void> {
+  const base = url.trim().replace(/\/$/, "");
+  const headers: Record<string, string> = {};
+  if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
+  const response = await fetch(`${base}/health`, {
+    headers,
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) {
+    throw new Error(`/health returned HTTP ${response.status}`);
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("/health did not return JSON");
+  }
+  if (!isBackendHealth(payload)) {
+    throw new Error("/health is not a Marginalia backend response");
+  }
 }
 
 export class ApiError extends Error {
@@ -508,8 +568,13 @@ export const exports_ = {
 
 // ---- health ---------------------------------------------------------------
 
-export const health = () =>
-  _request<{ status: string; storage_backend: string }>(`/health`);
+export const health = async (): Promise<BackendHealth> => {
+  const payload = await _request<unknown>(`/health`);
+  if (!isBackendHealth(payload)) {
+    throw new Error("Connected URL is not a Marginalia backend");
+  }
+  return payload;
+};
 
 // ---- settings -------------------------------------------------------------
 

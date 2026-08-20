@@ -129,7 +129,9 @@ If local responses are unstable, lower concurrency before increasing token budge
 | API base URL | Where the GUI sends backend API requests. | Leave empty in the packaged desktop app. Use `http://host:8000` only for a remote backend. |
 | API bearer token | Token used when the backend sets `MARGINALIA_API_TOKEN`. | Leave empty for a local single-user desktop setup. |
 
-Only change Connection when the GUI talks to a separate backend.
+Only change Connection when the GUI talks to a separate backend. The API base
+URL is the address of a **Marginalia backend**, not an Ollama or LM Studio model
+endpoint. Configure local model URLs under **LLM profiles**.
 
 ### Preferences
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.6 - 2026-08-20
+
+### Fixed
+
+- Desktop backend overrides are now verified against Marginalia's `/health`
+  response before they are saved. Ollama and LM Studio model endpoints can no
+  longer be mistaken for the GUI backend, and a bad existing override can be
+  cleared from the startup screen to restore the bundled backend.
+- The Settings page no longer exposes or persists the bundled sidecar's
+  ephemeral runtime port as a user-configured remote backend.
+
 ## 0.3.5 - 2026-08-19
 
 ### Changed

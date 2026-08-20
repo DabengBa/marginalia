@@ -114,6 +114,10 @@ const en = {
     failedLogHint: "See the full log at",
     retry: "Retry",
     quit: "Quit",
+    customBaseTitle: "A custom backend URL is active",
+    customBaseBody:
+      "This must point to a Marginalia backend, not an Ollama or LM Studio model endpoint. Clear it to reconnect to the backend bundled with the desktop app.",
+    useBundled: "Use bundled backend",
   },
   chat: {
     newChat: "New chat",
@@ -599,6 +603,11 @@ const en = {
     apiBaseHelp:
       "Leave empty to use the dev proxy (recommended in browser). Set to",
     apiBaseHelpTail: "when connecting to a remote server.",
+    apiBaseModelWarning:
+      "Do not enter an Ollama or LM Studio URL here. Configure model endpoints under LLM profiles.",
+    apiBaseValidating: "Checking...",
+    apiBaseValidationFailed: (detail: string) =>
+      `Not saved: this URL is not a reachable Marginalia backend (${detail}).`,
     apiBasePlaceholder: "(empty = same-origin / proxy)",
     apiToken: "API bearer token",
     apiTokenHelp:
@@ -876,6 +885,10 @@ const zh: I18nStrings = {
     failedLogHint: "完整日志位于",
     retry: "重试",
     quit: "退出",
+    customBaseTitle: "当前启用了自定义后端地址",
+    customBaseBody:
+      "这里必须指向 Marginalia 后端，不能填写 Ollama 或 LM Studio 模型地址。清除该地址即可重新连接桌面应用自带的后端。",
+    useBundled: "使用内置后端",
   },
   chat: {
     newChat: "新会话",
@@ -1357,6 +1370,11 @@ const zh: I18nStrings = {
     apiBaseUrl: "API 基础 URL",
     apiBaseHelp: "留空则使用开发代理（浏览器中推荐）。连接远端服务器时设置为",
     apiBaseHelpTail: "。",
+    apiBaseModelWarning:
+      "不要在这里填写 Ollama 或 LM Studio 地址；模型服务地址应在 LLM 配置中设置。",
+    apiBaseValidating: "正在检查...",
+    apiBaseValidationFailed: (detail: string) =>
+      `未保存：该地址不是可访问的 Marginalia 后端（${detail}）。`,
     apiBasePlaceholder: "（留空 = 同源 / 代理）",
     apiToken: "API bearer token",
     apiTokenHelp: "仅在服务器设置 MARGINALIA_API_TOKEN 时需要。只保存在当前浏览器本地。",

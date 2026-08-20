@@ -131,7 +131,9 @@ Ollama 可以执行 ingest，但前提是模型上下文能容纳当前文件分
 | API base URL | GUI 请求后端 API 的地址。 | 打包版桌面应用留空；浏览器开发模式通常也留空；连接远程服务器时填 `http://host:8000`。 |
 | API bearer token | 如果后端设置了 `MARGINALIA_API_TOKEN`，这里填写对应 token。 | 单机桌面版留空。 |
 
-只有在“前端和后端分开跑”或“连接另一台服务器”时，才需要改这里。
+只有在“前端和后端分开跑”或“连接另一台服务器”时，才需要改这里。API base URL
+必须是 **Marginalia 后端**地址，不能填写 Ollama 或 LM Studio 模型服务地址；
+本地模型 URL 应在 **LLM 配置**中设置。
 
 ### Preferences：偏好
 
