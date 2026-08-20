@@ -4,8 +4,39 @@
 
 ## 0.3.6 - 2026-08-20
 
+### Changed
+
+- Chat delivery is now durable: every public event is committed before SSE
+  delivery, frames carry resumable cursors, desktop and CLI clients reconnect
+  automatically, and explicit cancellation is independent from viewer
+  disconnects.
+- Tool calls expose replay-stable turn/index identifiers without leaking or
+  replacing provider-side identifiers used for model tool-result pairing.
+- Session and completed-task collection APIs support stable keyset pagination,
+  backed by composite indexes that also keep bounded retention scans fast.
+- Optional document, storage-byte, ingest-backlog, and concurrent-chat gates
+  reject excess work with HTTP 429 before expensive processing begins.
+- Relation mining, section embeddings, task cleanup, and event cleanup now
+  have explicit read, candidate, page, batch, and retention bounds.
+- PostgreSQL can run through transaction-pooled proxies with disabled asyncpg
+  statement caching and globally unique prepared-statement names.
+- Managed deployments can migrate once with `marginalia-db-prepare`, disable
+  runtime schema DDL on API/worker replicas, use `/live` for liveness and
+  `/ready` for bounded database/storage readiness checks, and run queue-only
+  workers without periodic scheduling.
+- Prompt-cache reporting distinguishes whole-prompt coverage from eligible
+  prefix reuse, and finalization keeps cache-affecting request parameters
+  stable across execution rounds.
+
 ### Fixed
 
+- Compatible-provider tool arguments receive bounded, semantics-safe JSON
+  repair; ambiguous malformed calls are rejected and can be corrected up to
+  two times instead of executing with invented values.
+- Durable event replay waits for the persisted terminal event when conversation
+  completion and event commits race, avoiding prematurely closed streams.
+- Legacy CLI SSE streams without durable conversation identities still finish
+  cleanly, while identified turns continue reconnecting until a terminal event.
 - Desktop backend overrides are now verified against Marginalia's `/health`
   response before they are saved. Ollama and LM Studio model endpoints can no
   longer be mistaken for the GUI backend, and a bad existing override can be
