@@ -18,6 +18,7 @@ import { settings as settingsApi } from "@/api/client";
 import type { LlmTestResult } from "@/api/client";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
+import { Input } from "antd";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
@@ -307,7 +308,8 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
             </select>
           </Field>
           <Field label={t.llm.model}>
-            <input
+            <Input
+              size="small"
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               placeholder={
@@ -321,11 +323,12 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : t.common.inherit(data.defaults.model)
               }
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+              className="font-mono"
             />
           </Field>
           <Field label={t.llm.baseUrl}>
-            <input
+            <Input
+              size="small"
               value={form.base_url ?? ""}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               placeholder={
@@ -339,13 +342,13 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : data.defaults.base_url || t.common.providerDefault
               }
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+              className="font-mono"
             />
           </Field>
 
           <Field label={t.llm.apiKey}>
-            <input
-              type="password"
+            <Input.Password
+              size="small"
               value={form.api_key ?? ""}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               placeholder={
@@ -353,7 +356,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                   ? t.common.setValue(view.api_key ?? "")
                   : t.common.unset
               }
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+              className="font-mono"
             />
             <p className="mt-1 text-xs text-fg-subtle">
               {t.llm.keepKeyHint}
