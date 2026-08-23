@@ -13,6 +13,8 @@ import { HelpPage } from "@/pages/HelpPage";
 import { AboutPage } from "@/pages/AboutPage";
 import { useI18n } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
+import { useAntdTheme } from "@/lib/antdTheme";
+import { ConfigProvider } from "antd";
 
 function isTauri(): boolean {
   return Boolean(
@@ -24,6 +26,7 @@ function isTauri(): boolean {
 export default function App() {
   const initTheme = useTheme((s) => s.init);
   const { locale } = useI18n();
+  const antdTheme = useAntdTheme();
 
   useEffect(() => {
     return initTheme();
@@ -39,7 +42,8 @@ export default function App() {
   }, [locale]);
 
   return (
-    <BackendGate>
+    <ConfigProvider theme={antdTheme}>
+      <BackendGate>
       <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <Sidebar />
@@ -63,6 +67,7 @@ export default function App() {
         </div>
         <StatusBar />
       </div>
-    </BackendGate>
+      </BackendGate>
+    </ConfigProvider>
   );
 }
