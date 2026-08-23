@@ -14,6 +14,7 @@ import { folders as foldersApi, uploads, ApiError, settings as settingsApi, webd
 import type { OnConflict, WebDavPlanItem, WebDavPlanResult, WebDavSyncLast } from "@/types/api";
 import { cn, formatBytes } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
+import { Checkbox } from "antd";
 
 export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
   parentId: string | null;
@@ -343,16 +344,14 @@ export function UploadDialog({
       {items.length > 0 && (
         <div className="mt-3 rounded-md border border-border bg-bg-subtle text-xs">
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-            <label className="flex cursor-pointer items-center gap-1.5 text-fg-base">
-              <input
-                type="checkbox"
-                checked={items.length > 0 && items.every((item) => item.selected)}
-                disabled={running}
-                onChange={toggleAll}
-                className="accent-accent"
-              />
-              <span>{t.dialogs.uploadFilterTitle}</span>
-            </label>
+            <Checkbox
+              checked={items.length > 0 && items.every((item) => item.selected)}
+              disabled={running}
+              onChange={toggleAll}
+              className="flex items-center gap-1.5 text-fg-base"
+            >
+              {t.dialogs.uploadFilterTitle}
+            </Checkbox>
             <span className="text-fg-muted">
               {t.dialogs.uploadPlan(uploadPlan.selectedFiles, uploadPlan.skippedFiles)}
               {" / "}
@@ -574,16 +573,14 @@ export function WebDavSyncDialog({
       {!loading && plan && (
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-            <label className="flex cursor-pointer items-center gap-1.5 text-fg-base">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                disabled={running || plan.items.length === 0}
-                onChange={toggleAll}
-                className="accent-accent"
-              />
-              <span>{t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}</span>
-            </label>
+            <Checkbox
+              checked={allSelected}
+              disabled={running || plan.items.length === 0}
+              onChange={toggleAll}
+              className="flex items-center gap-1.5 text-fg-base"
+            >
+              {t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}
+            </Checkbox>
           </div>
           {running && (
             <div className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-2 text-xs text-fg-muted">
@@ -712,12 +709,10 @@ function WebDavPlanRow({
   return (
     <tr className="border-b border-border last:border-0">
       <td className="px-3 py-1.5">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={selected}
           disabled={disabled}
           onChange={() => onToggle(item.entry_id)}
-          className="accent-accent"
         />
       </td>
       <td className="min-w-0 px-1 py-1.5">
