@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AlertCircle, CheckCircle2, ExternalLink, RefreshCw } from "lucide-react";
 
 import { APP_VERSION } from "@/lib/appVersion";
+import { Button } from "antd";
 import { useI18n } from "@/lib/i18n";
 import { interceptExternalLink } from "@/lib/openExternal";
 import { cn } from "@/lib/utils";
@@ -64,22 +65,16 @@ export function AboutPage() {
               <h2 className="text-sm font-semibold">{t.about.versionTitle}</h2>
               <p className="mt-1 font-mono text-lg">v{APP_VERSION}</p>
             </div>
-            <button
-              type="button"
-              disabled={state.status === "checking"}
+            <Button
+              type="primary"
+              loading={state.status === "checking"}
+              icon={<RefreshCw size={14} />}
               onClick={() => void checkLatest()}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg",
-                "hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60",
-              )}
             >
-              <RefreshCw
-                className={cn("h-4 w-4", state.status === "checking" && "animate-spin")}
-              />
               {state.status === "checking"
                 ? t.about.checkingLatest
                 : t.about.checkLatest}
-            </button>
+            </Button>
           </div>
 
           <LatestVersionResult state={state} />
