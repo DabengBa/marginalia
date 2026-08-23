@@ -13,7 +13,7 @@
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
-import { Select, Tooltip } from "antd";
+import { Segmented, Select, Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -597,25 +597,16 @@ function AppearanceSection() {
         </Row>
 
         <Row label={t.settings.theme}>
-          <div className="flex gap-1">
-            {(["light", "dark", "system"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs",
-                  mode === m
-                    ? "border-accent bg-accent/10 text-accent"
-                    : "border-border bg-bg-base hover:bg-bg-subtle",
-                )}
-              >
-                {m === "light" && <Sun size={11} />}
-                {m === "dark" && <Moon size={11} />}
-                {m === "system" && <Monitor size={11} />}
-                {t.theme[m]}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            size="small"
+            value={mode}
+            onChange={(v) => setMode(v as "light" | "dark" | "system")}
+            options={[
+              { value: "light", icon: <Sun size={14} />, label: t.theme.light },
+              { value: "dark", icon: <Moon size={14} />, label: t.theme.dark },
+              { value: "system", icon: <Monitor size={14} />, label: t.theme.system },
+            ]}
+          />
         </Row>
 
         <Row label={t.settings.compactSidebar} hint={t.settings.compactSidebarHint}>
