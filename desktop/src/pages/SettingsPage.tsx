@@ -12,8 +12,8 @@
  *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
-import { Segmented, Select, Switch, Tooltip } from "antd";
+import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor } from "lucide-react";
+import { Button, Segmented, Select, Switch, Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -364,15 +364,14 @@ function ConnectionSection() {
           placeholder={t.settings.apiBasePlaceholder}
           className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
         />
-        <button
+        <Button
+          type="primary"
+          loading={saving}
+          icon={<Save size={13} />}
           onClick={() => void save()}
-          disabled={saving}
-          className={cn(
-            "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50",
-          )}
         >
-          <Save size={13} /> {saving ? t.settings.apiBaseValidating : t.common.save}
-        </button>
+          {saving ? t.settings.apiBaseValidating : t.common.save}
+        </Button>
       </div>
       <label className="mt-4 block text-sm font-medium">{t.settings.apiToken}</label>
       <p className="mt-1 text-xs text-fg-subtle">{t.settings.apiTokenHelp}</p>
@@ -537,21 +536,21 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
           </div>
         </Row>
         <div className="flex flex-wrap items-center gap-2">
-          <button
+          <Button
+            type="primary"
+            loading={busy === "save"}
+            icon={<Save size={13} />}
             onClick={save}
-            disabled={busy !== null}
-            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
           >
-            <Save size={13} /> {busy === "save" ? t.settings.webdavSaving : t.common.save}
-          </button>
-          <button
+            {busy === "save" ? t.settings.webdavSaving : t.common.save}
+          </Button>
+          <Button
             onClick={syncRemoteStatus}
             disabled={busy !== null || !status?.configured}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
+            loading={busy === "remote"}
           >
-            {busy === "remote" && <RefreshCw size={13} className="animate-spin" />}
             {t.settings.webdavRemoteStatus}
-          </button>
+          </Button>
         </div>
         <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1 text-xs">
           <Kv k={t.settings.webdavConfigured} v={status?.configured ? t.common.yes : t.common.no} />
@@ -922,16 +921,15 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
                 <span className="text-sm text-fg-muted">
                   {semanticIndexStatusLabel(server, t)}
                 </span>
-                <button
-                  type="button"
+                <Button
+                  size="small"
                   disabled={!server.embedding_api_key_set || rebuildBusy}
+                  loading={rebuildBusy}
                   onClick={rebuildSemanticIndex}
-                  className="inline-flex items-center gap-2 rounded border border-border bg-bg-base px-2 py-1 text-sm hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-50"
                   title={server.embedding_api_key_set ? t.settings.rebuildSemanticIndex : t.settings.semanticRebuildNoKey}
                 >
-                  <RefreshCw className={cn("h-4 w-4", rebuildBusy && "animate-spin")} />
                   {t.settings.rebuildSemanticIndex}
-                </button>
+                </Button>
               </div>
               {rebuildMessage && <p className="text-xs text-fg-muted">{rebuildMessage}</p>}
               {rebuildError && <p className="text-xs text-danger">{rebuildError}</p>}
@@ -1129,18 +1127,19 @@ function SettingsNav({ items }: { items: { id: string; label: string }[] }) {
         </div>
         <nav className="flex flex-col">
           {items.map((it) => (
-            <button
+            <Button
               key={it.id}
-              type="button"
+              type="text"
+              size="small"
               onClick={() =>
                 document
                   .getElementById(it.id)
                   ?.scrollIntoView({ behavior: "smooth", block: "start" })
               }
-              className="rounded-md px-2 py-1 text-left text-sm text-fg-muted hover:bg-bg-muted hover:text-fg-base"
+              className="h-auto w-full justify-start px-2 py-1 text-left text-sm text-fg-muted"
             >
               {it.label}
-            </button>
+            </Button>
           ))}
         </nav>
       </div>
@@ -1374,15 +1373,14 @@ function SecretInput({
         placeholder={configured ? t.settings.secretConfigured : t.common.unset}
         className="w-48 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs disabled:opacity-50"
       />
-      <button
-        type="button"
+      <Button
+        type="text"
+        size="small"
         title={t.common.save}
+        icon={<Save size={13} />}
         onClick={() => void commit()}
         disabled={disabled || saving || !draft.trim()}
-        className="inline-flex h-7 w-7 items-center justify-center rounded border border-border bg-bg-base text-fg-muted hover:text-fg-base disabled:opacity-40"
-      >
-        <Save size={13} />
-      </button>
+      />
     </div>
   );
 }
