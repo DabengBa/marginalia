@@ -13,7 +13,7 @@
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
-import { Segmented, Select, Tooltip } from "antd";
+import { Segmented, Select, Switch, Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -520,11 +520,10 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
         </Row>
         <Row label={t.settings.webdavAutoSync} hint={t.settings.webdavAutoSyncHint}>
           <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
+            <Switch
+              size="small"
               checked={autoSync}
-              onChange={(e) => setAutoSync(e.target.checked)}
-              className="h-4 w-4 accent-accent"
+              onChange={(checked) => setAutoSync(checked)}
             />
             <input
               type="number"
@@ -610,11 +609,10 @@ function AppearanceSection() {
         </Row>
 
         <Row label={t.settings.compactSidebar} hint={t.settings.compactSidebarHint}>
-          <input
-            type="checkbox"
+          <Switch
+            size="small"
             checked={prefs.compactSidebar}
-            onChange={(e) => prefs.setCompactSidebar(e.target.checked)}
-            className="h-4 w-4 accent-accent"
+            onChange={(checked) => prefs.setCompactSidebar(checked)}
           />
         </Row>
       </div>
@@ -721,12 +719,11 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           label={t.settings.compression}
           hint={t.settings.compressionHint}
         >
-          <input
-            type="checkbox"
+          <Switch
+            size="small"
             checked={Boolean(server?.compression_enabled)}
             disabled={!server}
-            onChange={(e) => setServerBoolean("compression_enabled", e.target.checked)}
-            className="h-4 w-4 accent-accent disabled:opacity-50"
+            onChange={(checked) => setServerBoolean("compression_enabled", checked)}
           />
         </Row>
 
@@ -829,11 +826,10 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </div>
 
           <Row label={t.settings.semanticRecall} hint={t.settings.semanticRecallHint}>
-            <input
-              type="checkbox"
+            <Switch
+              size="small"
               checked={server.semantic_recall_enabled}
-              onChange={(e) => setServerBoolean("semantic_recall_enabled", e.target.checked)}
-              className="h-4 w-4 accent-accent"
+              onChange={(checked) => setServerBoolean("semantic_recall_enabled", checked)}
             />
           </Row>
 
@@ -949,11 +945,10 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </div>
 
           <Row label={t.settings.documentVisionEnabled} hint={t.settings.documentVisionEnabledHint}>
-            <input
-              type="checkbox"
+            <Switch
+              size="small"
               checked={server.document_vision_enabled}
-              onChange={(e) => setServerBoolean("document_vision_enabled", e.target.checked)}
-              className="h-4 w-4 accent-accent"
+              onChange={(checked) => setServerBoolean("document_vision_enabled", checked)}
             />
           </Row>
         </div>
@@ -964,11 +959,10 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </div>
 
           <Row label={t.settings.rerankEnabled} hint={t.settings.rerankEnabledHint}>
-            <input
-              type="checkbox"
+            <Switch
+              size="small"
               checked={server.rerank_enabled}
-              onChange={(e) => setServerBoolean("rerank_enabled", e.target.checked)}
-              className="h-4 w-4 accent-accent"
+              onChange={(checked) => setServerBoolean("rerank_enabled", checked)}
             />
           </Row>
 
