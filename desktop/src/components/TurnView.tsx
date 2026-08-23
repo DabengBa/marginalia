@@ -20,6 +20,7 @@ import { useAuthObjectUrl } from "@/components/library/viewers/ViewerShared";
 import type { ChatImage } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
+import { Button } from "antd";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
 
@@ -183,9 +184,11 @@ export function TurnView({ turn }: { turn: Turn }) {
 
       {showSteps && (
         <div className="ml-8 mb-2">
-          <button
+          <Button
+            type="text"
+            size="small"
             onClick={() => setOpen((o) => !o)}
-            className="group flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg-base"
+            className="flex items-center gap-1.5 px-0 text-xs text-fg-muted hover:text-fg-base"
           >
             <ChevronDown
               size={12}
@@ -196,7 +199,7 @@ export function TurnView({ turn }: { turn: Turn }) {
               {inFlight && ` · ${t.chat.inProgress}`}
             </span>
             {inFlight && <Loader2 size={11} className="animate-spin" />}
-          </button>
+          </Button>
           {open && (
             <ul className="mt-2 space-y-1.5 border-l border-border pl-3 text-xs">
               {turn.steps.map((s, i) => (
