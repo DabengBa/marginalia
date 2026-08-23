@@ -18,7 +18,7 @@ import { settings as settingsApi } from "@/api/client";
 import type { LlmTestResult } from "@/api/client";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Input } from "antd";
+import { Input, Select } from "antd";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
@@ -286,13 +286,12 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       {isOpen && (
         <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
           <Field label={t.llm.provider}>
-            <select
-              value={form.provider ?? ""}
-              onChange={(e) => setForm({ ...form, provider: e.target.value })}
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
-            >
-              <option value="">
-                {isDefault
+            <Select
+              size="small"
+              value={form.provider || undefined}
+              allowClear
+              placeholder={
+                isDefault
                   ? view.provider
                     ? t.common.fromEnv(view.provider)
                     : t.common.unset
@@ -300,12 +299,15 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                     ? view.provider
                       ? t.common.fromEnv(view.provider)
                       : t.common.unset
-                    : t.common.inherit(data.defaults.provider)}
-              </option>
-              <option value="openai">openai</option>
-              <option value="openai-compatible">openai-compatible</option>
-              <option value="anthropic">anthropic</option>
-            </select>
+                    : t.common.inherit(data.defaults.provider)
+              }
+              onChange={(v) => setForm({ ...form, provider: v ?? "" })}
+              options={[
+                { value: "openai", label: "openai" },
+                { value: "openai-compatible", label: "openai-compatible" },
+                { value: "anthropic", label: "anthropic" },
+              ]}
+            />
           </Field>
           <Field label={t.llm.model}>
             <Input
