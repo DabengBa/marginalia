@@ -13,6 +13,7 @@
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
+import { Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -1166,16 +1167,11 @@ function Section({
       <h2 className="text-sm font-semibold">
         {title}
         {subtitle && (
-          <span className="group relative ml-1 inline-flex translate-y-px">
-            <CircleHelp
-              size={12}
-              aria-label={subtitle}
-              className="cursor-help text-fg-subtle hover:text-fg-muted"
-            />
-            <span className="pointer-events-none absolute left-0 top-6 z-50 w-60 rounded-md border border-border bg-bg-base px-2.5 py-1.5 text-xs font-normal normal-case leading-snug text-fg-base opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-              {subtitle}
+          <Tooltip title={subtitle}>
+            <span className="ml-1 inline-flex translate-y-px cursor-help text-fg-subtle hover:text-fg-muted">
+              <CircleHelp size={12} aria-label={subtitle} />
             </span>
-          </span>
+          </Tooltip>
         )}
       </h2>
       <div className="mt-4">{children}</div>
@@ -1198,16 +1194,11 @@ function Row({
         <div className="text-sm font-medium">
           {label}
           {hint && (
-            <span className="group relative ml-1 inline-flex translate-y-px">
-              <CircleHelp
-                size={12}
-                aria-label={hint}
-                className="cursor-help text-fg-subtle hover:text-fg-muted"
-              />
-              <span className="pointer-events-none absolute left-0 top-6 z-50 w-60 rounded-md border border-border bg-bg-base px-2.5 py-1.5 text-xs font-normal normal-case leading-snug text-fg-base opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-                {hint}
+            <Tooltip title={hint}>
+              <span className="ml-1 inline-flex translate-y-px cursor-help text-fg-subtle hover:text-fg-muted">
+                <CircleHelp size={12} aria-label={hint} />
               </span>
-            </span>
+            </Tooltip>
           )}
         </div>
       </div>
