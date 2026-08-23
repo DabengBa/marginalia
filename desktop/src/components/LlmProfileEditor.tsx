@@ -18,7 +18,7 @@ import { settings as settingsApi } from "@/api/client";
 import type { LlmTestResult } from "@/api/client";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Input, Select } from "antd";
+import { Input, InputNumber, Select } from "antd";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
@@ -366,13 +366,13 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           </Field>
 
           <Field label={t.llm.contextWindow}>
-            <input
-              type="number"
+            <InputNumber
+              size="small"
               min={1024}
-              value={form.context_window ?? ""}
-              onChange={(e) => setForm({ ...form, context_window: e.target.value })}
+              value={form.context_window ? Number(form.context_window) : undefined}
+              onChange={(v) => setForm({ ...form, context_window: v != null ? String(v) : "" })}
               placeholder={String(view.capabilities.context_window)}
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+              className="w-full font-mono"
             />
           </Field>
           <CapabilitySelect
