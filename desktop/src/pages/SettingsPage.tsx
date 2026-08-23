@@ -13,7 +13,7 @@
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
-import { Tooltip } from "antd";
+import { Select, Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -583,15 +583,17 @@ function AppearanceSection() {
     <Section id="appearance" title={t.settings.appearanceTitle}>
       <div className="space-y-5">
         <Row label={t.settings.language} hint={t.settings.languageHint}>
-          <select
+          <Select
+            size="small"
             value={language}
-            onChange={(e) => setLanguage(e.target.value as LanguagePreference)}
-            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
-          >
-            <option value="auto">{t.locale.auto}</option>
-            <option value="en">{t.locale.en}</option>
-            <option value="zh">{t.locale.zh}</option>
-          </select>
+            className="w-32"
+            onChange={(v) => setLanguage(v as LanguagePreference)}
+            options={[
+              { value: "auto", label: t.locale.auto },
+              { value: "en", label: t.locale.en },
+              { value: "zh", label: t.locale.zh },
+            ]}
+          />
         </Row>
 
         <Row label={t.settings.theme}>
