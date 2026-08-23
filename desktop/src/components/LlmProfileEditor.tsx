@@ -22,9 +22,8 @@ import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
 const EDITABLE_FIELDS = [
-  "provider", "model", "base_url", "api_key", "dialect", "context_window",
-  "tokenizer", "supports_vision", "supports_tools", "supports_temperature",
-  "token_limit_param",
+  "provider", "model", "base_url", "api_key", "context_window",
+  "supports_vision", "supports_tools", "supports_temperature",
 ] as const;
 
 type FormState = Partial<Record<string, string>>;
@@ -175,13 +174,10 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
       model: overlayValue("model"),
       base_url: overlayValue("base_url"),
       api_key: "",
-      dialect: overlayValue("dialect"),
       context_window: overlayValue("context_window"),
-      tokenizer: overlayValue("tokenizer"),
       supports_vision: overlayValue("supports_vision"),
       supports_tools: overlayValue("supports_tools"),
       supports_temperature: overlayValue("supports_temperature"),
-      token_limit_param: overlayValue("token_limit_param"),
     });
     setErr(null);
     setHealed(0);
@@ -346,14 +342,24 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
-          <Field label={t.llm.dialect}>
+
+          <Field label={t.llm.apiKey}>
             <input
-              value={form.dialect ?? ""}
-              onChange={(e) => setForm({ ...form, dialect: e.target.value })}
-              placeholder={view.capabilities.dialect}
+              type="password"
+              value={form.api_key ?? ""}
+              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+              placeholder={
+                view.api_key_set
+                  ? t.common.setValue(view.api_key ?? "")
+                  : t.common.unset
+              }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
+            <p className="mt-1 text-xs text-fg-subtle">
+              {t.llm.keepKeyHint}
+            </p>
           </Field>
+
           <Field label={t.llm.contextWindow}>
             <input
               type="number"
@@ -361,14 +367,6 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               value={form.context_window ?? ""}
               onChange={(e) => setForm({ ...form, context_window: e.target.value })}
               placeholder={String(view.capabilities.context_window)}
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
-            />
-          </Field>
-          <Field label={t.llm.tokenizer}>
-            <input
-              value={form.tokenizer ?? ""}
-              onChange={(e) => setForm({ ...form, tokenizer: e.target.value })}
-              placeholder={view.capabilities.tokenizer}
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
@@ -390,34 +388,6 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
             inherited={view.capabilities.supports_temperature}
             onChange={(value) => setForm({ ...form, supports_temperature: value })}
           />
-          <Field label={t.llm.tokenLimitParam}>
-            <select
-              value={form.token_limit_param ?? ""}
-              onChange={(e) => setForm({ ...form, token_limit_param: e.target.value })}
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
-            >
-              <option value="">{view.capabilities.token_limit_param}</option>
-              <option value="max_tokens">max_tokens</option>
-              <option value="max_completion_tokens">max_completion_tokens</option>
-            </select>
-          </Field>
-          <Field label={t.llm.apiKey}>
-            <input
-              type="password"
-              value={form.api_key ?? ""}
-              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder={
-                view.api_key_set
-                  ? t.common.setValue(view.api_key ?? "")
-                  : t.common.unset
-              }
-              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
-            />
-            <p className="mt-1 text-xs text-fg-subtle">
-              {t.llm.keepKeyHint}
-            </p>
-          </Field>
-
           {err && (
             <p className="rounded bg-danger/10 px-2 py-1 text-xs text-danger">
               {err}
