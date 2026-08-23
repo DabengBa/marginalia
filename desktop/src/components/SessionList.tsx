@@ -17,6 +17,7 @@ import { sessions as sessionsApi } from "@/api/client";
 import type { SessionListEntry } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
+import { Button } from "antd";
 
 interface Props {
   activeSessionId: string | null;
@@ -64,12 +65,13 @@ export function SessionList({
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border bg-bg-subtle">
       <div className="border-b border-border p-3">
-        <button
+        <Button
+          block
+          icon={<Plus size={13} />}
           onClick={onNewChat}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-2 text-sm hover:bg-bg-muted"
         >
-          <Plus size={13} /> {t.chat.newChat}
-        </button>
+          {t.chat.newChat}
+        </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-2">
