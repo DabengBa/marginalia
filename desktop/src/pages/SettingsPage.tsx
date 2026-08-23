@@ -661,16 +661,18 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           label={t.settings.conflictPolicy}
           hint={t.settings.conflictHint}
         >
-          <select
+          <Select
+            size="small"
             value={server?.default_on_conflict ?? "rename"}
             disabled={!server}
-            onChange={(e) => setDefaultConflict(e.target.value as OnConflict)}
-            className="rounded border border-border bg-bg-base px-2 py-1 text-sm disabled:opacity-50"
-          >
-            <option value="rename">{t.settings.conflictRename}</option>
-            <option value="error">{t.settings.conflictError}</option>
-            <option value="skip">{t.settings.conflictSkip}</option>
-          </select>
+            className="w-40"
+            onChange={(v) => setDefaultConflict(v as OnConflict)}
+            options={[
+              { value: "rename", label: t.settings.conflictRename },
+              { value: "error", label: t.settings.conflictError },
+              { value: "skip", label: t.settings.conflictSkip },
+            ]}
+          />
         </Row>
 
         <Row
@@ -762,17 +764,19 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           label={t.settings.statusRefresh}
           hint={t.settings.statusRefreshHint}
         >
-          <select
+          <Select
+            size="small"
             value={prefs.statusPollMs}
-            onChange={(e) => prefs.setStatusPollMs(parseInt(e.target.value, 10))}
-            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
-          >
-            <option value={2000}>2 s</option>
-            <option value={4000}>4 s (default)</option>
-            <option value={10000}>10 s</option>
-            <option value={30000}>30 s</option>
-            <option value={60000}>60 s</option>
-          </select>
+            className="w-32"
+            onChange={(v) => prefs.setStatusPollMs(v as number)}
+            options={[
+              { value: 2000, label: "2 s" },
+              { value: 4000, label: "4 s (default)" },
+              { value: 10000, label: "10 s" },
+              { value: 30000, label: "30 s" },
+              { value: 60000, label: "60 s" },
+            ]}
+          />
         </Row>
       </div>
     </Section>
@@ -834,14 +838,16 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </Row>
 
           <Row label={t.settings.embeddingProvider}>
-            <select
+            <Select
+              size="small"
               value={server.embedding_provider}
-              onChange={(e) => setServerString("embedding_provider", e.target.value)}
-              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
-            >
-              <option value="openai-compatible">openai-compatible</option>
-              <option value="dashscope">dashscope</option>
-            </select>
+              className="w-48"
+              onChange={(v) => setServerString("embedding_provider", v as string)}
+              options={[
+                { value: "openai-compatible", label: "openai-compatible" },
+                { value: "dashscope", label: "dashscope" },
+              ]}
+            />
           </Row>
 
           <Row label={t.settings.embeddingApiKey} hint={t.llm.keepKeyHint}>
@@ -901,15 +907,17 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </Row>
 
           <Row label={t.settings.semanticIndexBackend}>
-            <select
+            <Select
+              size="small"
               value={server.semantic_index_backend}
-              onChange={(e) => setServerString("semantic_index_backend", e.target.value)}
-              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
-            >
-              <option value="auto">auto</option>
-              <option value="file">file</option>
-              <option value="sqlite-vec">sqlite-vec</option>
-            </select>
+              className="w-40"
+              onChange={(v) => setServerString("semantic_index_backend", v as string)}
+              options={[
+                { value: "auto", label: "auto" },
+                { value: "file", label: "file" },
+                { value: "sqlite-vec", label: "sqlite-vec" },
+              ]}
+            />
           </Row>
 
           <Row label={t.settings.semanticIndex} hint={t.settings.semanticIndexHint}>
@@ -1021,14 +1029,16 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
           </Row>
 
           <Row label={t.settings.evidenceSelection} hint={t.settings.evidenceSelectionHint}>
-            <select
+            <Select
+              size="small"
               value={server.evidence_selection}
-              onChange={(e) => setServerString("evidence_selection", e.target.value)}
-              className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
-            >
-              <option value="quota">quota</option>
-              <option value="rerank">rerank</option>
-            </select>
+              className="w-28"
+              onChange={(v) => setServerString("evidence_selection", v as string)}
+              options={[
+                { value: "quota", label: "quota" },
+                { value: "rerank", label: "rerank" },
+              ]}
+            />
           </Row>
         </div>
       </div>
