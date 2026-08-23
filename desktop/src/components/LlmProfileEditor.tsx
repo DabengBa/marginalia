@@ -457,15 +457,17 @@ function CapabilitySelect({
 }) {
   return (
     <Field label={label}>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
-      >
-        <option value="">{String(inherited)}</option>
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
+      <Select
+        size="small"
+        value={value || undefined}
+        allowClear
+        placeholder={String(inherited)}
+        onChange={(v) => onChange(v ?? "")}
+        options={[
+          { value: "true", label: "true" },
+          { value: "false", label: "false" },
+        ]}
+      />
     </Field>
   );
 }
