@@ -573,6 +573,9 @@ const en = {
   },
   settings: {
     title: "Settings",
+    modelsTitle: "Models",
+    appearanceTitle: "Appearance",
+    strategyTitle: "Strategy",
     guideTitle: "First-run guide",
     guideSubtitle: "Minimum setup before importing files and asking questions.",
     guideStatusLoading: "Checking LLM configuration...",
@@ -1341,6 +1344,9 @@ const zh: I18nStrings = {
   },
   settings: {
     title: "设置",
+    modelsTitle: "模型设置",
+    appearanceTitle: "外观",
+    strategyTitle: "策略",
     guideTitle: "首次配置指南",
     guideSubtitle: "导入文件和提问前，先完成这些最小配置。",
     guideStatusLoading: "正在检查 LLM 配置...",
@@ -1365,7 +1371,7 @@ const zh: I18nStrings = {
     guideEmbeddingTitle: "Embedding 是可选增强",
     guideEmbeddingBody:
       "基础资料库检索和带引用问答不要求 embedding 模型。只有需要语义向量召回时，才启用语义召回、填写 embedding key，并重建 semantic index。",
-    connectionTitle: "连接",
+    connectionTitle: "连接 Marginalia 后端",
     connectionSubtitle: "GUI 如何连接 Marginalia 后端。",
     apiBaseUrl: "API 基础 URL",
     apiBaseHelp: "留空则使用开发代理（浏览器中推荐）。连接远端服务器时设置为",

@@ -12,7 +12,7 @@
  *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
+import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
 
 import {
   clearBaseUrlOverride,
@@ -77,17 +77,33 @@ interface ServerCtx {
 export function SettingsPage() {
   const ctx = useServerCtx();
   const { t } = useI18n();
+  const navItems = [
+    { id: "llm-profiles", label: t.settings.modelsTitle },
+    { id: "appearance", label: t.settings.appearanceTitle },
+    { id: "preferences", label: t.settings.strategyTitle },
+    { id: "connection", label: t.settings.connectionTitle },
+    { id: "webdav", label: t.settings.webdavTitle },
+    { id: "server-status", label: t.settings.serverStatusTitle },
+  ];
   return (
     <div className="h-full overflow-y-auto px-8 py-8">
-      <div className="mx-auto max-w-2xl space-y-6">
-        <h1 className="text-xl font-semibold">{t.settings.title}</h1>
+      <div className="mx-auto flex max-w-6xl gap-6">
+        <SettingsNav items={navItems} />
+        <div className="min-w-0 flex-1 space-y-6">
+          <h1 className="text-xl font-semibold">{t.settings.title}</h1>
 
-        <QuickStartSection ctx={ctx} />
-        <ConnectionSection />
-        <WebDavSection initial={ctx.server?.webdav ?? null} />
-        <PreferencesSection ctx={ctx} />
-        <RetrievalSection ctx={ctx} />
-        <ServerSection ctx={ctx} />
+          <ModelsSection ctx={ctx} />
+          <AppearanceSection />
+          <PreferencesSection ctx={ctx} />
+          <ConnectionSection />
+          <WebDavSection initial={ctx.server?.webdav ?? null} />
+          <ServerSection ctx={ctx} />
+        </div>
+        <div className="hidden w-80 shrink-0 xl:block">
+          <div className="sticky top-8">
+            <QuickStartSection ctx={ctx} />
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -225,6 +241,7 @@ function QuickStartSection({ ctx }: { ctx: ServerCtx }) {
 
   return (
     <Section
+      id="quickstart"
       title={t.settings.guideTitle}
       subtitle={t.settings.guideSubtitle}
     >
@@ -248,14 +265,6 @@ function QuickStartSection({ ctx }: { ctx: ServerCtx }) {
         <ol className="space-y-3 text-sm">
           <GuideStep index={1} title={t.settings.guideConfigureTitle}>
             <p>{t.settings.guideConfigureBody}</p>
-            <p className="mt-1 text-xs text-fg-subtle">
-              {t.settings.guideLocalModelPrefix}{" "}
-              <code className="font-mono">openai-compatible</code>,{" "}
-              <code className="font-mono">http://127.0.0.1:11434/v1</code>{" "}
-              {t.common.or}{" "}
-              <code className="font-mono">http://127.0.0.1:1234/v1</code>;
-              {" "}{t.settings.guideLocalModelKey}
-            </p>
           </GuideStep>
           <GuideStep index={2} title={t.settings.guideImportTitle}>
             <p>{t.settings.guideImportBody}</p>
@@ -339,7 +348,7 @@ function ConnectionSection() {
   };
 
   return (
-    <Section title={t.settings.connectionTitle} subtitle={t.settings.connectionSubtitle}>
+    <Section id="connection" title={t.settings.connectionTitle} subtitle={t.settings.connectionSubtitle}>
       <label className="block text-sm font-medium">{t.settings.apiBaseUrl}</label>
       <p className="mt-1 text-xs text-fg-subtle">
         {t.settings.apiBaseHelp}
@@ -471,7 +480,7 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   const remoteSnapshot = last?.remote_snapshot_id || t.common.unset;
 
   return (
-    <Section title={t.settings.webdavTitle} subtitle={t.settings.webdavSubtitle}>
+    <Section id="webdav" title={t.settings.webdavTitle} subtitle={t.settings.webdavSubtitle}>
       <div className="space-y-4">
         <Row label={t.settings.webdavUrl}>
           <input
@@ -563,21 +572,14 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   );
 }
 
-// ---- Preferences -----------------------------------------------------------
+// ---- Models ----------------------------------------------------------------
 
-function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
+function AppearanceSection() {
   const { mode, setMode } = useTheme();
   const prefs = usePrefs();
   const { t, language, setLanguage } = useI18n();
-  const {
-    server,
-    setDefaultConflict,
-    setServerNumber,
-    setServerBoolean,
-  } = ctx;
-
   return (
-    <Section title={t.settings.preferencesTitle} subtitle={t.settings.preferencesSubtitle}>
+    <Section id="appearance" title={t.settings.appearanceTitle}>
       <div className="space-y-5">
         <Row label={t.settings.language} hint={t.settings.languageHint}>
           <select
@@ -613,6 +615,54 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           </div>
         </Row>
 
+        <Row label={t.settings.compactSidebar} hint={t.settings.compactSidebarHint}>
+          <input
+            type="checkbox"
+            checked={prefs.compactSidebar}
+            onChange={(e) => prefs.setCompactSidebar(e.target.checked)}
+            className="h-4 w-4 accent-accent"
+          />
+        </Row>
+      </div>
+    </Section>
+  );
+}
+
+function ModelsSection({ ctx }: { ctx: ServerCtx }) {
+  const { llm, setLlm } = ctx;
+  const { t } = useI18n();
+  if (!llm) {
+    return (
+      <Section id="llm-profiles" title={t.settings.llmProfilesTitle} subtitle={t.settings.llmProfilesSubtitle}>
+        <p className="text-sm text-fg-subtle">{t.common.loading}</p>
+      </Section>
+    );
+  }
+  return (
+    <>
+      <Section id="llm-profiles" title={t.settings.llmProfilesTitle} subtitle={t.settings.llmProfilesSubtitle}>
+        <LlmProfileEditor data={llm} onChange={setLlm} />
+      </Section>
+      <RetrievalSection ctx={ctx} />
+    </>
+  );
+}
+
+// ---- Strategy (preferences minus appearance) --------------------------------
+
+function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
+  const prefs = usePrefs();
+  const { t } = useI18n();
+  const {
+    server,
+    setDefaultConflict,
+    setServerNumber,
+    setServerBoolean,
+  } = ctx;
+
+  return (
+    <Section id="preferences" title={t.settings.strategyTitle} subtitle={t.settings.preferencesSubtitle}>
+      <div className="space-y-5">
         <Row
           label={t.settings.conflictPolicy}
           hint={t.settings.conflictHint}
@@ -730,15 +780,6 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
             <option value={60000}>60 s</option>
           </select>
         </Row>
-
-        <Row label={t.settings.compactSidebar} hint={t.settings.compactSidebarHint}>
-          <input
-            type="checkbox"
-            checked={prefs.compactSidebar}
-            onChange={(e) => prefs.setCompactSidebar(e.target.checked)}
-            className="h-4 w-4 accent-accent"
-          />
-        </Row>
       </div>
     </Section>
   );
@@ -782,7 +823,7 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
   };
 
   return (
-    <Section title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
+    <Section id="retrieval" title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
       <div className="space-y-6">
         <div className="space-y-4">
           <div className="text-xs font-semibold text-fg-muted">
@@ -1004,7 +1045,7 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
 // ---- Server status + LLM editor --------------------------------------------
 
 function ServerSection({ ctx }: { ctx: ServerCtx }) {
-  const { server, llm, err, setLlm } = ctx;
+  const { server, llm, err } = ctx;
   const { t } = useI18n();
 
   if (err) {
@@ -1025,7 +1066,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
 
   return (
     <>
-      <Section title={t.settings.serverStatusTitle} subtitle={t.settings.serverStatusSubtitle}>
+      <Section id="server-status" title={t.settings.serverStatusTitle} subtitle={t.settings.serverStatusSubtitle}>
         <dl className="grid grid-cols-[1fr_2fr] gap-x-4 gap-y-2 text-sm">
           <Kv k={t.settings.kv.appEnv} v={server.app_env} />
           <Kv k={t.settings.kv.home} v={server.marginalia_home} mono />
@@ -1074,32 +1115,69 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
           />
         </dl>
       </Section>
-
-      <Section
-        title={t.settings.llmProfilesTitle}
-        subtitle={t.settings.llmProfilesSubtitle}
-      >
-        <LlmProfileEditor data={llm} onChange={setLlm} />
-      </Section>
     </>
   );
 }
 
 // ---- shared bits -----------------------------------------------------------
 
+function SettingsNav({ items }: { items: { id: string; label: string }[] }) {
+  const { t } = useI18n();
+  return (
+    <aside className="hidden w-44 shrink-0 lg:block">
+      <div className="sticky top-8 space-y-0.5">
+        <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+          {t.settings.title}
+        </div>
+        <nav className="flex flex-col">
+          {items.map((it) => (
+            <button
+              key={it.id}
+              type="button"
+              onClick={() =>
+                document
+                  .getElementById(it.id)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+              className="rounded-md px-2 py-1 text-left text-sm text-fg-muted hover:bg-bg-muted hover:text-fg-base"
+            >
+              {it.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+    </aside>
+  );
+}
+
 function Section({
+  id,
   title,
   subtitle,
   children,
 }: {
+  id?: string;
   title: string;
   subtitle?: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-md border border-border bg-bg-subtle p-4">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      {subtitle && <p className="mt-0.5 text-xs text-fg-subtle">{subtitle}</p>}
+    <section id={id} className="scroll-mt-8 rounded-md border border-border bg-bg-subtle p-4">
+      <h2 className="text-sm font-semibold">
+        {title}
+        {subtitle && (
+          <span className="group relative ml-1 inline-flex translate-y-px">
+            <CircleHelp
+              size={12}
+              aria-label={subtitle}
+              className="cursor-help text-fg-subtle hover:text-fg-muted"
+            />
+            <span className="pointer-events-none absolute left-0 top-6 z-50 w-60 rounded-md border border-border bg-bg-base px-2.5 py-1.5 text-xs font-normal normal-case leading-snug text-fg-base opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+              {subtitle}
+            </span>
+          </span>
+        )}
+      </h2>
       <div className="mt-4">{children}</div>
     </section>
   );
@@ -1117,8 +1195,21 @@ function Row({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">{label}</div>
-        {hint && <div className="mt-0.5 text-xs text-fg-subtle">{hint}</div>}
+        <div className="text-sm font-medium">
+          {label}
+          {hint && (
+            <span className="group relative ml-1 inline-flex translate-y-px">
+              <CircleHelp
+                size={12}
+                aria-label={hint}
+                className="cursor-help text-fg-subtle hover:text-fg-muted"
+              />
+              <span className="pointer-events-none absolute left-0 top-6 z-50 w-60 rounded-md border border-border bg-bg-base px-2.5 py-1.5 text-xs font-normal normal-case leading-snug text-fg-base opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                {hint}
+              </span>
+            </span>
+          )}
+        </div>
       </div>
       <div className="shrink-0">{children}</div>
     </div>

@@ -60,6 +60,17 @@ export function LlmProfileEditor({ data, onChange }: Props) {
 
   return (
     <div className="space-y-2">
+      {PROFILES.map((name) => (
+        <ProfileRow
+          key={name}
+          name={name}
+          data={data}
+          isOpen={open === name}
+          onToggle={() => setOpen(open === name ? null : name)}
+          onChange={onChange}
+        />
+      ))}
+
       <div className="flex items-center justify-end">
         <button
           onClick={runTest}
@@ -88,17 +99,6 @@ export function LlmProfileEditor({ data, onChange }: Props) {
           ))}
         </div>
       )}
-
-      {PROFILES.map((name) => (
-        <ProfileRow
-          key={name}
-          name={name}
-          data={data}
-          isOpen={open === name}
-          onToggle={() => setOpen(open === name ? null : name)}
-          onChange={onChange}
-        />
-      ))}
     </div>
   );
 }
