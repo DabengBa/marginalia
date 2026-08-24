@@ -1136,7 +1136,8 @@ function SettingsNav({ items }: { items: { id: string; label: string }[] }) {
                   .getElementById(it.id)
                   ?.scrollIntoView({ behavior: "smooth", block: "start" })
               }
-              className="h-auto w-full justify-start px-2 py-1 text-left text-sm text-fg-muted"
+              className="h-auto w-full px-2 py-1 text-sm text-fg-muted"
+              style={{ justifyContent: "flex-start", textAlign: "left" }}
             >
               {it.label}
             </Button>
