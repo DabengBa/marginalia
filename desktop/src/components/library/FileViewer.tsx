@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, Download, Cloud, Loader2 } from "lucide-react";
+import { FileText, Download, Cloud } from "lucide-react";
 
 import { fileEntries, maybeAuthDownload, webdavSync } from "@/api/client";
 import type { FileMetadata } from "@/types/api";
 import { useI18n } from "@/lib/i18n";
+import { Button } from "antd";
 import {
   ArchiveView,
   BinaryView,
@@ -114,9 +115,11 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
         <FileText size={14} className="text-fg-muted" />
         <span className="flex-1 truncate font-medium">{name || t.common.unset}</span>
         {needsHydrate ? (
-          <button
-            type="button"
+          <Button
+            size="small"
             disabled={hydrating}
+            loading={hydrating}
+            icon={<Cloud size={12} />}
             onClick={async () => {
               setHydrating(true);
               setHydrateError(null);
@@ -129,11 +132,9 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
                 setHydrating(false);
               }
             }}
-            className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-50"
           >
-            {hydrating ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
             {t.library.hydrateFromWebDav}
-          </button>
+          </Button>
         ) : (
           <a href={downloadUrl} download onClick={(e) => maybeAuthDownload(e, downloadUrl, name)} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
             <Download size={12} /> {t.library.download}
