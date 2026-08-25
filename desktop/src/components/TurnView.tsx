@@ -20,7 +20,7 @@ import { useAuthObjectUrl } from "@/components/library/viewers/ViewerShared";
 import type { ChatImage } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Button } from "antd";
+import { Button, Image } from "antd";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
 
@@ -91,7 +91,6 @@ const _IMAGE_MARKER_RE = /\s*\[(?:image|\d+\s+images?)\s+attached\]\s*$/i;
 
 export function TurnView({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false);
-  const [lightbox, setLightbox] = useState<string | null>(null);
   const navigate = useNavigate();
   const { t } = useI18n();
 
@@ -151,34 +150,22 @@ export function TurnView({ turn }: { turn: Turn }) {
           {turn.images?.map((img, i) => {
             const src = `data:${img.media_type};base64,${img.data_b64}`;
             return (
-              <img
+              <Image
                 key={`live-${i}`}
                 src={src}
                 alt={t.chat.imageAlt(i + 1)}
-                onClick={() => setLightbox(src)}
+                width={64}
+                height={64}
+                preview={{ mask: false }}
                 className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
               />
             );
           })}
           {turn.attachmentUrls?.map((url, i) => (
             <ReplayedAttachment
-              key={`replay-${i}`} url={url} index={i} onOpen={setLightbox}
+              key={`replay-${i}`} url={url} index={i}
             />
           ))}
-        </div>
-      )}
-
-      {lightbox && (
-        <div
-          onClick={() => setLightbox(null)}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 cursor-zoom-out animate-fade-in"
-        >
-          <img
-            src={lightbox}
-            alt={t.chat.imageAlt(1)}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
-          />
         </div>
       )}
 
@@ -245,17 +232,18 @@ export function TurnView({ turn }: { turn: Turn }) {
  *  box so the loading/error states don't shift layout, matching the live
  *  pasted-image thumbnails. */
 function ReplayedAttachment(
-  { url, index, onOpen }:
-  { url: string; index: number; onOpen: (src: string) => void },
+  { url, index }: { url: string; index: number },
 ) {
   const { t } = useI18n();
   const { src, err } = useAuthObjectUrl(url);
   if (src) {
     return (
-      <img
+      <Image
         src={src}
         alt={t.chat.imageAlt(index + 1)}
-        onClick={() => onOpen(src)}
+        width={64}
+        height={64}
+        preview={{ mask: false }}
         className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
       />
     );
@@ -297,16 +285,18 @@ function StepRow({ step }: { step: Step }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           {expandable ? (
-            <button
+            <Button
+              type="text"
+              size="small"
               onClick={() => setOpen((o) => !o)}
               className={cn(
-                "truncate text-left hover:text-fg-base",
+                "h-auto min-w-0 truncate p-0 text-left",
                 step.result === "failed" && "text-danger",
               )}
               title={expandTitle}
             >
               {step.label}
-            </button>
+            </Button>
           ) : (
             <span className={cn(
               "truncate",

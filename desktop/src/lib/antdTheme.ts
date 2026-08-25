@@ -13,14 +13,20 @@ import { useTheme } from "@/lib/theme";
 
 interface Palette {
   accent: string;
+  accentFg: string;
+  accentSubtle: string;
   bgBase: string;
   bgSubtle: string;
+  bgMuted: string;
   bgElevated: string;
   fgBase: string;
   fgMuted: string;
+  fgSubtle: string;
   borderDefault: string;
+  borderStrong: string;
   danger: string;
   warning: string;
+  fontSans: string;
 }
 
 function readPalette(): Palette {
@@ -32,14 +38,20 @@ function readPalette(): Palette {
   };
   return {
     accent: rgb("--accent"),
+    accentFg: rgb("--accent-fg"),
+    accentSubtle: rgb("--accent-subtle"),
     bgBase: rgb("--bg-base"),
     bgSubtle: rgb("--bg-subtle"),
+    bgMuted: rgb("--bg-muted"),
     bgElevated: rgb("--bg-elevated"),
     fgBase: rgb("--fg-base"),
     fgMuted: rgb("--fg-muted"),
+    fgSubtle: rgb("--fg-subtle"),
     borderDefault: rgb("--border-default"),
+    borderStrong: rgb("--border-strong"),
     danger: rgb("--danger"),
     warning: rgb("--warning"),
+    fontSans: cs.getPropertyValue("--font-sans").trim(),
   };
 }
 
@@ -60,15 +72,65 @@ export function useAntdTheme(): ThemeConfig {
     token: {
       colorPrimary: palette.accent,
       colorInfo: palette.accent,
+      colorLink: palette.accent,
+      colorPrimaryText: palette.accent,
+      colorPrimaryBg: palette.accentSubtle,
       colorBgContainer: palette.bgBase,
+      colorBgContainerDisabled: palette.bgMuted,
       colorBgElevated: palette.bgElevated,
       colorBgLayout: palette.bgSubtle,
+      colorFill: palette.bgMuted,
+      colorFillSecondary: palette.bgMuted,
+      colorFillTertiary: palette.bgSubtle,
       colorText: palette.fgBase,
       colorTextSecondary: palette.fgMuted,
+      colorTextTertiary: palette.fgSubtle,
+      colorTextDisabled: palette.fgSubtle,
       colorBorder: palette.borderDefault,
+      colorBorderSecondary: palette.borderDefault,
       colorError: palette.danger,
       colorWarning: palette.warning,
+      fontFamily: palette.fontSans,
       borderRadius: 8,
+    },
+    components: {
+      Button: {
+        defaultBg: palette.bgBase,
+        defaultColor: palette.fgBase,
+        defaultBorderColor: palette.borderDefault,
+        defaultHoverBg: palette.bgMuted,
+        defaultHoverColor: palette.fgBase,
+        defaultHoverBorderColor: palette.borderStrong,
+        defaultActiveBg: palette.bgSubtle,
+        defaultActiveColor: palette.fgBase,
+        defaultActiveBorderColor: palette.borderStrong,
+        textTextColor: palette.fgMuted,
+        textTextHoverColor: palette.fgBase,
+        textTextActiveColor: palette.fgBase,
+        primaryColor: palette.accentFg,
+        defaultShadow: "none",
+        primaryShadow: "none",
+        dangerShadow: "none",
+      },
+      Collapse: {
+        headerBg: palette.bgSubtle,
+        contentBg: palette.bgBase,
+      },
+      Modal: {
+        headerBg: palette.bgElevated,
+        contentBg: palette.bgElevated,
+        footerBg: palette.bgElevated,
+        titleColor: palette.fgBase,
+      },
+      Segmented: {
+        trackBg: palette.bgMuted,
+        itemColor: palette.fgMuted,
+        itemHoverColor: palette.fgBase,
+        itemHoverBg: palette.bgSubtle,
+        itemActiveBg: palette.bgSubtle,
+        itemSelectedBg: palette.bgBase,
+        itemSelectedColor: palette.fgBase,
+      },
     },
   };
 }

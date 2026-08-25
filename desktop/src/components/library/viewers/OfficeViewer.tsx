@@ -10,6 +10,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { Button, Input, Tooltip } from "antd";
 
 import { maybeAuthDownload } from "@/api/client";
 import { useI18n } from "@/lib/i18n";
@@ -98,12 +99,13 @@ function OfficeViewerToolbar({
 }: OfficeViewerToolbarProps) {
   const { t } = useI18n();
   return (
-    <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg px-3 text-xs text-fg-muted">
+    <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg-base px-3 text-xs text-fg-muted">
       <div className="flex items-center gap-1">
         <ViewerToolbarButton title={prevTitle} disabled={!canPrev} onClick={onPrev}>
           {prevIcon}
         </ViewerToolbarButton>
-        <input
+        <Input
+          size="small"
           value={positionInput}
           disabled={!ready || total <= 0}
           onChange={(event) => onPositionInputChange(event.target.value)}
@@ -118,7 +120,8 @@ function OfficeViewerToolbar({
             }
           }}
           inputMode="numeric"
-          className="h-7 w-12 rounded border border-border bg-bg px-1.5 text-center text-xs text-fg-base tabular-nums outline-none focus:border-accent disabled:opacity-50"
+          className="w-12 text-center text-xs tabular-nums"
+          style={{ height: 28 }}
           aria-label={inputLabel}
         />
         <span className="min-w-10 text-center tabular-nums">/ {total || "-"}</span>
@@ -153,15 +156,19 @@ function OfficeViewerToolbar({
         <ViewerToolbarButton title={t.viewer.print} disabled={!canPrint} onClick={onPrint}>
           <Printer size={14} />
         </ViewerToolbarButton>
-        <a
-          href={downloadUrl}
-          download={name}
-          onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
-          title={t.viewer.download}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border text-fg-muted transition-colors hover:bg-bg-muted"
-        >
-          <Download size={14} />
-        </a>
+        <Tooltip title={t.viewer.download}>
+          <Button
+            size="small"
+            href={downloadUrl}
+            download={name}
+            onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
+            title={t.viewer.download}
+            aria-label={t.viewer.download}
+            icon={<Download size={14} />}
+            className="shrink-0 text-fg-muted"
+            style={{ width: 28, height: 28, minWidth: 28, padding: 0 }}
+          />
+        </Tooltip>
       </div>
     </div>
   );
@@ -645,12 +652,12 @@ function DocxScrollView({ url, name, downloadUrl, quote, block, onScrolled }: {
           ))}
         </div>
         {(!ready || (rendering && renderedPageCount === 0)) && !err && (
-          <div className="absolute inset-0 z-20 bg-bg/70">
+          <div className="absolute inset-0 z-20 bg-bg-base/70">
             <ViewerLoading />
           </div>
         )}
         {err && (
-          <div className="absolute inset-0 z-20 bg-bg">
+          <div className="absolute inset-0 z-20 bg-bg-base">
             <ViewerError msg={err} />
           </div>
         )}
@@ -884,7 +891,7 @@ function OoxmlView({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const thumbnailCanvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
-  const thumbnailButtonRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const thumbnailButtonRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<OoxmlViewerInstance | null>(null);
   const [ready, setReady] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1303,22 +1310,25 @@ function OoxmlView({
       />
       <div className="flex min-h-0 flex-1">
         {isPptx && (
-          <aside className="hidden w-36 shrink-0 overflow-y-auto border-r border-border bg-bg px-2 py-3 md:block">
+          <aside className="hidden w-36 shrink-0 overflow-y-auto border-r border-border bg-bg-base px-2 py-3 md:block">
             <div className="space-y-2">
               {Array.from({ length: position.total }, (_, i) => {
                 const active = i === position.current;
                 return (
-                  <button
+                  <Button
                     key={i}
                     ref={(el) => { thumbnailButtonRefs.current[i] = el; }}
-                    type="button"
+                    type="default"
+                    size="small"
+                    block
                     onClick={() => goToPosition(i)}
                     className={
-                      "block w-full rounded border p-1 text-left transition-colors " +
+                      "h-auto w-full p-1 text-left transition-colors " +
                       (active
                         ? "border-accent/60 bg-accent/10 text-accent"
                         : "border-border bg-bg-subtle text-fg-muted hover:bg-bg-muted")
                     }
+                    classNames={{ content: "block w-full" }}
                     title={t.viewer.slide(i + 1)}
                   >
                     <div className="flex aspect-video w-full items-center justify-center overflow-hidden bg-white shadow-sm">
@@ -1328,7 +1338,7 @@ function OoxmlView({
                       />
                     </div>
                     <div className="mt-1 text-center text-[11px] tabular-nums">{i + 1}</div>
-                  </button>
+                  </Button>
                 );
               })}
             </div>
@@ -1363,12 +1373,12 @@ function OoxmlView({
             </div>
           </div>
           {!ready && !err && (
-            <div className="absolute inset-0 z-20 bg-bg/80">
+            <div className="absolute inset-0 z-20 bg-bg-base/80">
               <ViewerLoading />
             </div>
           )}
           {err && (
-            <div className="absolute inset-0 z-20 bg-bg">
+            <div className="absolute inset-0 z-20 bg-bg-base">
               <ViewerError msg={err} />
             </div>
           )}

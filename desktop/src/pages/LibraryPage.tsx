@@ -32,6 +32,7 @@ const SIDEBAR_WIDTH_KEY = "marginalia.library.sidebarWidth";
 const SIDEBAR_DEFAULT_WIDTH = 288;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 560;
+const META_AUTO_COLLAPSE_QUERY = "(max-width: 1100px)";
 
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -39,7 +40,9 @@ export function LibraryPage() {
   const [selectedFolder, setSelectedFolder] = useState<Folder | null>(null);
   const [meta, setMeta] = useState<FileMetadata | null>(null);
   const [metaLoading, setMetaLoading] = useState(false);
-  const [metaOpen, setMetaOpen] = useState(true);
+  const [metaOpen, setMetaOpen] = useState(
+    () => typeof window === "undefined" || !window.matchMedia(META_AUTO_COLLAPSE_QUERY).matches,
+  );
   const [refreshKey, setRefreshKey] = useState(0);
   const triggerRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
   const activeFileIdsRef = useRef<Set<string>>(new Set());
@@ -65,6 +68,16 @@ export function LibraryPage() {
   const [webdavDialog, setWebdavDialog] = useState<"upload" | "download" | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+
+  useEffect(() => {
+    const media = window.matchMedia(META_AUTO_COLLAPSE_QUERY);
+    const collapseWhenNarrow = () => {
+      if (media.matches) setMetaOpen(false);
+    };
+    collapseWhenNarrow();
+    media.addEventListener("change", collapseWhenNarrow);
+    return () => media.removeEventListener("change", collapseWhenNarrow);
+  }, []);
   const ingestingFileIds = useMemo<Set<string>>(() => {
     const set = new Set<string>();
     if (!active) return set;

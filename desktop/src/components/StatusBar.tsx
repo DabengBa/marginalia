@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity, Wifi, WifiOff } from "lucide-react";
+import { Button, Popover } from "antd";
 
 import { health, tasks } from "@/api/client";
 import { ActivityPopover } from "@/components/ActivityPopover";
@@ -12,7 +13,6 @@ export function StatusBar() {
   const [storage, setStorage] = useState<string>("");
   const [busy, setBusy] = useState({ running: 0, pending: 0 });
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const popoverRef = useRef<HTMLDivElement>(null);
   const pollMs = usePrefs((s) => s.statusPollMs);
   const { t } = useI18n();
 
@@ -44,20 +44,6 @@ export function StatusBar() {
     };
   }, [pollMs]);
 
-  // Click-outside to close — the popover sits absolutely above the
-  // footer, so any click outside the wrapper should dismiss it.
-  useEffect(() => {
-    if (!popoverOpen) return;
-    function onDown(ev: MouseEvent) {
-      if (!popoverRef.current) return;
-      if (!popoverRef.current.contains(ev.target as Node)) {
-        setPopoverOpen(false);
-      }
-    }
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [popoverOpen]);
-
   const totalBusy = busy.running + busy.pending;
 
   return (
@@ -77,26 +63,36 @@ export function StatusBar() {
               : t.status.backendOffline}
         </span>
       </div>
-      <div ref={popoverRef}>
-        <button
-          onClick={() => setPopoverOpen((o) => !o)}
+      <Popover
+        open={popoverOpen}
+        onOpenChange={setPopoverOpen}
+        trigger="click"
+        placement="topRight"
+        arrow={false}
+        destroyOnHidden
+        content={<ActivityPopover open={popoverOpen} pollMs={pollMs} />}
+        styles={{ container: { padding: 0 } }}
+      >
+        <Button
+          type="text"
+          size="small"
+          icon={(
+            <Activity
+              size={11}
+              className={cn(totalBusy > 0 && "text-accent animate-pulse-soft")}
+            />
+          )}
           className={cn(
-            "flex items-center gap-1 rounded px-1 py-0.5",
-            "hover:bg-bg-muted hover:text-fg-base",
+            "h-5 px-1 text-[11px]",
             popoverOpen && "bg-bg-muted text-fg-base",
           )}
           title={t.status.showActivity}
         >
-          <Activity
-            size={11}
-            className={cn(totalBusy > 0 && "text-accent animate-pulse-soft")}
-          />
           {totalBusy > 0
             ? t.status.busy(busy.running, busy.pending)
             : t.status.idle}
-        </button>
-        <ActivityPopover open={popoverOpen} pollMs={pollMs} />
-      </div>
+        </Button>
+      </Popover>
     </footer>
   );
 }

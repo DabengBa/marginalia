@@ -53,7 +53,7 @@ export function ImageView({ url, name, sizeBytes }: { url: string; name: string;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-subtle">
-      <div className="flex h-9 shrink-0 items-center justify-end border-b border-border bg-bg px-3 text-xs text-fg-muted">
+      <div className="flex h-9 shrink-0 items-center justify-end border-b border-border bg-bg-base px-3 text-xs text-fg-muted">
         <span className="min-w-16 text-center tabular-nums">{Math.round(zoom.zoom * 100)}%</span>
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">

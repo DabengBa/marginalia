@@ -1,19 +1,9 @@
-/** Settings page — four sections.
- *
- *  1. Connection: API base URL (client-side, persisted to localStorage)
- *  2. Preferences: theme, default conflict policy, status-bar polling
- *  3. Retrieval: embedding recall and rerank runtime overlay
- *  4. Server status (read-only) + LLM profile editor (writable overlay)
- *
- *  Server state (server + llm) lives on the page so Preferences and the
- *  Server-status card stay in lockstep — picking a conflict policy in
- *  Preferences updates the read-only line below without a re-fetch.
- *
- *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
- *  and shows a friendly empty state if the server is offline. */
+/** Settings page grouped by user task: interface, models and agents,
+ * retrieval, import processing, connections, and diagnostics. Server state
+ * lives on the page so editable cards and read-only status stay in lockstep. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Save, Sun, Moon, Monitor } from "lucide-react";
-import { Button, Segmented, Select, Switch, Tooltip } from "antd";
+import { Button, Collapse, Input, InputNumber, Segmented, Select, Switch, Tooltip } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -78,32 +68,69 @@ interface ServerCtx {
 export function SettingsPage() {
   const ctx = useServerCtx();
   const { t } = useI18n();
-  const navItems = [
-    { id: "llm-profiles", label: t.settings.modelsTitle },
-    { id: "appearance", label: t.settings.appearanceTitle },
-    { id: "preferences", label: t.settings.strategyTitle },
-    { id: "connection", label: t.settings.connectionTitle },
-    { id: "webdav", label: t.settings.webdavTitle },
-    { id: "server-status", label: t.settings.serverStatusTitle },
+  const navGroups: SettingsNavGroup[] = [
+    {
+      label: t.settings.navGeneral,
+      items: [{ id: "appearance", label: t.settings.appearanceTitle }],
+    },
+    {
+      label: t.settings.navIntelligence,
+      items: [
+        { id: "llm-profiles", label: t.settings.modelsTitle },
+        { id: "agent-behavior", label: t.settings.agentTitle },
+      ],
+    },
+    {
+      label: t.settings.navKnowledge,
+      items: [
+        { id: "embedding", label: t.settings.embeddingGroup },
+        { id: "rerank", label: t.settings.rerankNavTitle },
+        { id: "ingest", label: t.settings.ingestTitle },
+      ],
+    },
+    {
+      label: t.settings.navConnections,
+      items: [
+        { id: "connection", label: t.settings.connectionTitle },
+        { id: "webdav", label: t.settings.webdavTitle },
+      ],
+    },
+    {
+      label: t.settings.navSystem,
+      items: [{ id: "server-status", label: t.settings.serverStatusTitle }],
+    },
   ];
   return (
     <div className="h-full overflow-y-auto px-8 py-8">
-      <div className="mx-auto flex max-w-6xl gap-6">
-        <SettingsNav items={navItems} />
-        <div className="min-w-0 flex-1 space-y-6">
+      <div className="mx-auto flex max-w-6xl gap-8">
+        <SettingsNav groups={navGroups} />
+        <div data-settings-main className="min-w-0 flex-1 space-y-8">
           <h1 className="text-xl font-semibold">{t.settings.title}</h1>
+          <QuickStartSection ctx={ctx} />
 
-          <ModelsSection ctx={ctx} />
-          <AppearanceSection />
-          <PreferencesSection ctx={ctx} />
-          <ConnectionSection />
-          <WebDavSection initial={ctx.server?.webdav ?? null} />
-          <ServerSection ctx={ctx} />
-        </div>
-        <div className="hidden w-80 shrink-0 xl:block">
-          <div className="sticky top-8">
-            <QuickStartSection ctx={ctx} />
-          </div>
+          <SettingsCategory title={t.settings.navGeneral}>
+            <AppearanceSection />
+          </SettingsCategory>
+
+          <SettingsCategory title={t.settings.navIntelligence}>
+            <ModelsSection ctx={ctx} />
+            <AgentSection ctx={ctx} />
+          </SettingsCategory>
+
+          <SettingsCategory title={t.settings.navKnowledge}>
+            <EmbeddingSection ctx={ctx} />
+            <RerankSection ctx={ctx} />
+            <IngestSection ctx={ctx} />
+          </SettingsCategory>
+
+          <SettingsCategory title={t.settings.navConnections}>
+            <ConnectionSection />
+            <WebDavSection initial={ctx.server?.webdav ?? null} />
+          </SettingsCategory>
+
+          <SettingsCategory title={t.settings.navSystem}>
+            <ServerSection ctx={ctx} />
+          </SettingsCategory>
         </div>
       </div>
     </div>
@@ -241,44 +268,41 @@ function QuickStartSection({ ctx }: { ctx: ServerCtx }) {
           : t.settings.guideStatusMissingProfiles(missing.join(", "));
 
   return (
-    <Section
-      id="quickstart"
-      title={t.settings.guideTitle}
-      subtitle={t.settings.guideSubtitle}
-    >
-      <div className="space-y-4">
-        <div
-          className={cn(
-            "flex items-start gap-2 rounded-md px-3 py-2 text-sm",
-            ready
-              ? "bg-accent-subtle text-fg-base"
-              : "bg-danger/10 text-fg-base",
-          )}
-        >
-          {ready ? (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-          ) : (
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-          )}
-          <span>{statusText}</span>
-        </div>
-
-        <ol className="space-y-3 text-sm">
-          <GuideStep index={1} title={t.settings.guideConfigureTitle}>
-            <p>{t.settings.guideConfigureBody}</p>
-          </GuideStep>
-          <GuideStep index={2} title={t.settings.guideImportTitle}>
-            <p>{t.settings.guideImportBody}</p>
-          </GuideStep>
-          <GuideStep index={3} title={t.settings.guideAskTitle}>
-            <p>{t.settings.guideAskBody}</p>
-          </GuideStep>
-          <GuideStep index={4} title={t.settings.guideEmbeddingTitle}>
-            <p>{t.settings.guideEmbeddingBody}</p>
-          </GuideStep>
-        </ol>
-      </div>
-    </Section>
+    <Collapse
+      size="small"
+      className="bg-bg-subtle"
+      style={{ marginBottom: 24 }}
+      items={[{
+        key: "guide",
+        label: (
+          <span className="flex min-w-0 items-center gap-2">
+            {ready ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-accent" />
+            ) : (
+              <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
+            )}
+            <span className="shrink-0 font-medium">{t.settings.guideTitle}</span>
+            <span className="truncate text-xs font-normal text-fg-muted">{statusText}</span>
+          </span>
+        ),
+        children: (
+          <ol className="grid gap-4 text-sm md:grid-cols-2">
+            <GuideStep index={1} title={t.settings.guideConfigureTitle}>
+              <p>{t.settings.guideConfigureBody}</p>
+            </GuideStep>
+            <GuideStep index={2} title={t.settings.guideImportTitle}>
+              <p>{t.settings.guideImportBody}</p>
+            </GuideStep>
+            <GuideStep index={3} title={t.settings.guideAskTitle}>
+              <p>{t.settings.guideAskBody}</p>
+            </GuideStep>
+            <GuideStep index={4} title={t.settings.guideEmbeddingTitle}>
+              <p>{t.settings.guideEmbeddingBody}</p>
+            </GuideStep>
+          </ol>
+        ),
+      }]}
+    />
   );
 }
 
@@ -358,11 +382,11 @@ function ConnectionSection() {
       </p>
       <p className="mt-1 text-xs text-warning">{t.settings.apiBaseModelWarning}</p>
       <div className="mt-3 flex gap-2">
-        <input
+        <Input
           value={base}
           onChange={(e) => setBase(e.target.value)}
           placeholder={t.settings.apiBasePlaceholder}
-          className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+          className="flex-1 font-mono text-sm"
         />
         <Button
           type="primary"
@@ -375,12 +399,11 @@ function ConnectionSection() {
       </div>
       <label className="mt-4 block text-sm font-medium">{t.settings.apiToken}</label>
       <p className="mt-1 text-xs text-fg-subtle">{t.settings.apiTokenHelp}</p>
-      <input
+      <Input.Password
         value={token}
         onChange={(e) => setToken(e.target.value)}
-        type="password"
         placeholder={t.settings.apiTokenPlaceholder}
-        className="mt-3 w-full rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+        className="mt-3 w-full font-mono text-sm"
       />
       {savedAt && (
         <p className="mt-2 text-xs text-fg-subtle">
@@ -483,54 +506,58 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
     <Section id="webdav" title={t.settings.webdavTitle} subtitle={t.settings.webdavSubtitle}>
       <div className="space-y-4">
         <Row label={t.settings.webdavUrl}>
-          <input
+          <Input
+            size="small"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://example.com/dav"
-            className="w-80 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs"
+            className="w-80 font-mono text-xs"
           />
         </Row>
         <Row label={t.settings.webdavRemotePath} hint={t.settings.webdavRemotePathHint}>
-          <input
+          <Input
+            size="small"
             value={remotePath}
             onChange={(e) => setRemotePath(e.target.value)}
             placeholder="/marginalia"
-            className="w-56 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs"
+            className="w-56 font-mono text-xs"
           />
         </Row>
         <Row label={t.settings.webdavUsername}>
-          <input
+          <Input
+            size="small"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            className="w-56 rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            className="w-56 text-sm"
           />
         </Row>
         <Row
           label={t.settings.webdavPassword}
           hint={status?.password_set ? t.settings.webdavPasswordSet : t.settings.webdavPasswordHint}
         >
-          <input
-            type="password"
+          <Input.Password
+            size="small"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={status?.password_set ? t.settings.webdavKeepPassword : ""}
-            className="w-56 rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            className="w-56 text-sm"
           />
         </Row>
         <Row label={t.settings.webdavAutoSync} hint={t.settings.webdavAutoSyncHint}>
-          <div className="flex items-center gap-2">
+          <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
             <Switch
               size="small"
               checked={autoSync}
               onChange={(checked) => setAutoSync(checked)}
             />
-            <input
-              type="number"
+            <InputNumber
+              size="small"
               min={5}
               max={10080}
-              value={interval}
-              onChange={(e) => setIntervalValue(e.target.value)}
-              className="w-20 rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs"
+              value={interval ? Number(interval) : null}
+              onChange={(value) => setIntervalValue(value == null ? "" : String(value))}
+              className="w-full"
+              classNames={{ input: "text-right font-mono text-xs" }}
             />
             <span className="text-xs text-fg-subtle">{t.settings.webdavMinutes}</span>
           </div>
@@ -571,14 +598,12 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   );
 }
 
-// ---- Models ----------------------------------------------------------------
-
 function AppearanceSection() {
   const { mode, setMode } = useTheme();
   const prefs = usePrefs();
   const { t, language, setLanguage } = useI18n();
   return (
-    <Section id="appearance" title={t.settings.appearanceTitle}>
+    <Section id="appearance" title={t.settings.appearanceTitle} subtitle={t.settings.appearanceSubtitle}>
       <div className="space-y-5">
         <Row label={t.settings.language} hint={t.settings.languageHint}>
           <Select
@@ -614,6 +639,21 @@ function AppearanceSection() {
             onChange={(checked) => prefs.setCompactSidebar(checked)}
           />
         </Row>
+
+        <Row label={t.settings.statusRefresh} hint={t.settings.statusRefreshHint}>
+          <Select
+            size="small"
+            value={prefs.statusPollMs}
+            onChange={(v) => prefs.setStatusPollMs(v as number)}
+            options={[
+              { value: 2000, label: "2 s" },
+              { value: 4000, label: "4 s (default)" },
+              { value: 10000, label: "10 s" },
+              { value: 30000, label: "30 s" },
+              { value: 60000, label: "60 s" },
+            ]}
+          />
+        </Row>
       </div>
     </Section>
   );
@@ -630,60 +670,31 @@ function ModelsSection({ ctx }: { ctx: ServerCtx }) {
     );
   }
   return (
-    <>
-      <Section id="llm-profiles" title={t.settings.llmProfilesTitle} subtitle={t.settings.llmProfilesSubtitle}>
-        <LlmProfileEditor data={llm} onChange={setLlm} />
-      </Section>
-      <RetrievalSection ctx={ctx} />
-    </>
+    <Section id="llm-profiles" title={t.settings.llmProfilesTitle} subtitle={t.settings.llmProfilesSubtitle}>
+      <LlmProfileEditor data={llm} onChange={setLlm} />
+    </Section>
   );
 }
 
-// ---- Strategy (preferences minus appearance) --------------------------------
-
-function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
-  const prefs = usePrefs();
+function AgentSection({ ctx }: { ctx: ServerCtx }) {
   const { t } = useI18n();
-  const {
-    server,
-    setDefaultConflict,
-    setServerNumber,
-    setServerBoolean,
-  } = ctx;
+  const { server, setServerNumber, setServerBoolean } = ctx;
 
   return (
-    <Section id="preferences" title={t.settings.strategyTitle} subtitle={t.settings.preferencesSubtitle}>
+    <Section id="agent-behavior" title={t.settings.agentTitle} subtitle={t.settings.agentSubtitle}>
       <div className="space-y-5">
-        <Row
-          label={t.settings.conflictPolicy}
-          hint={t.settings.conflictHint}
-        >
-          <Select
-            size="small"
-            value={server?.default_on_conflict ?? "rename"}
-            disabled={!server}
-            className="w-40"
-            onChange={(v) => setDefaultConflict(v as OnConflict)}
-            options={[
-              { value: "rename", label: t.settings.conflictRename },
-              { value: "error", label: t.settings.conflictError },
-              { value: "skip", label: t.settings.conflictSkip },
-            ]}
-          />
-        </Row>
-
         <Row
           label={t.settings.agentTokenBudget}
           hint={t.settings.agentTokenBudgetHint}
         >
-          <div className="flex items-center gap-1.5">
+          <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5">
             <NumberInput
               value={server?.agent_plan_max_tokens}
               disabled={!server}
               min={1}
               max={200000}
               step={128}
-              className="w-20"
+              className="w-full"
               onCommit={(v) => setServerNumber("agent_plan_max_tokens", v)}
             />
             <span className="text-xs text-fg-subtle">/</span>
@@ -693,7 +704,7 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
               min={1}
               max={200000}
               step={128}
-              className="w-20"
+              className="w-full"
               onCommit={(v) => setServerNumber("agent_execute_max_tokens", v)}
             />
           </div>
@@ -725,63 +736,12 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
             onChange={(checked) => setServerBoolean("compression_enabled", checked)}
           />
         </Row>
-
-        <Row
-          label={t.settings.concurrentIngest}
-          hint={t.settings.concurrentIngestHint}
-        >
-          <NumberInput
-            value={server?.worker_batch_size}
-            disabled={!server}
-            min={1}
-            max={32}
-            step={1}
-            className="w-16"
-            onCommit={(v) => setServerNumber("worker_batch_size", v)}
-          />
-        </Row>
-
-        <Row
-          label={t.settings.ingestLlmConcurrency}
-          hint={t.settings.ingestLlmConcurrencyHint}
-        >
-          <NumberInput
-            value={server?.llm_ingest_concurrency}
-            disabled={!server}
-            min={1}
-            max={32}
-            step={1}
-            className="w-16"
-            onCommit={(v) => setServerNumber("llm_ingest_concurrency", v)}
-          />
-        </Row>
-
-        <Row
-          label={t.settings.statusRefresh}
-          hint={t.settings.statusRefreshHint}
-        >
-          <Select
-            size="small"
-            value={prefs.statusPollMs}
-            className="w-32"
-            onChange={(v) => prefs.setStatusPollMs(v as number)}
-            options={[
-              { value: 2000, label: "2 s" },
-              { value: 4000, label: "4 s (default)" },
-              { value: 10000, label: "10 s" },
-              { value: 30000, label: "30 s" },
-              { value: 60000, label: "60 s" },
-            ]}
-          />
-        </Row>
       </div>
     </Section>
   );
 }
 
-// ---- Retrieval ------------------------------------------------------------
-
-function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
+function EmbeddingSection({ ctx }: { ctx: ServerCtx }) {
   const {
     server,
     setServerBoolean,
@@ -796,7 +756,7 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
 
   if (!server) {
     return (
-      <Section title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
+      <Section id="embedding" title={t.settings.embeddingGroup} subtitle={t.settings.embeddingSubtitle}>
         <p className="text-sm text-fg-subtle">{t.common.loading}</p>
       </Section>
     );
@@ -817,22 +777,17 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
   };
 
   return (
-    <Section id="retrieval" title={t.settings.retrievalTitle} subtitle={t.settings.retrievalSubtitle}>
-      <div className="space-y-6">
-        <div className="space-y-4">
-          <div className="text-xs font-semibold text-fg-muted">
-            {t.settings.embeddingGroup}
-          </div>
-
-          <Row label={t.settings.semanticRecall} hint={t.settings.semanticRecallHint}>
+    <Section id="embedding" title={t.settings.embeddingGroup} subtitle={t.settings.embeddingSubtitle}>
+      <div className="space-y-5">
+        <Row label={t.settings.semanticRecall} hint={t.settings.semanticRecallHint}>
             <Switch
               size="small"
               checked={server.semantic_recall_enabled}
               onChange={(checked) => setServerBoolean("semantic_recall_enabled", checked)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingProvider}>
+        <Row label={t.settings.embeddingProvider}>
             <Select
               size="small"
               value={server.embedding_provider}
@@ -843,32 +798,32 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
                 { value: "dashscope", label: "dashscope" },
               ]}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingApiKey} hint={t.llm.keepKeyHint}>
+        <Row label={t.settings.embeddingApiKey} hint={t.llm.keepKeyHint}>
             <SecretInput
               configured={server.embedding_api_key_set}
               onCommit={(v) => setServerSecret("embedding_api_key", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingBaseUrl}>
+        <Row label={t.settings.embeddingBaseUrl}>
             <TextInput
               value={server.embedding_base_url}
               className="w-72"
               onCommit={(v) => setServerString("embedding_base_url", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingModel}>
+        <Row label={t.settings.embeddingModel}>
             <TextInput
               value={server.embedding_model}
               className="w-48"
               onCommit={(v) => setServerString("embedding_model", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingDimensions}>
+        <Row label={t.settings.embeddingDimensions}>
             <NumberInput
               value={server.embedding_dimensions}
               min={1}
@@ -877,9 +832,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-20"
               onCommit={(v) => setServerNumber("embedding_dimensions", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.embeddingBatchSize}>
+        <Row label={t.settings.embeddingBatchSize}>
             <NumberInput
               value={server.embedding_batch_size}
               min={1}
@@ -888,9 +843,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-16"
               onCommit={(v) => setServerNumber("embedding_batch_size", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.semanticRecallLimit}>
+        <Row label={t.settings.semanticRecallLimit}>
             <NumberInput
               value={server.semantic_recall_limit}
               min={1}
@@ -899,9 +854,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-20"
               onCommit={(v) => setServerNumber("semantic_recall_limit", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.semanticIndexBackend}>
+        <Row label={t.settings.semanticIndexBackend}>
             <Select
               size="small"
               value={server.semantic_index_backend}
@@ -913,11 +868,11 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
                 { value: "sqlite-vec", label: "sqlite-vec" },
               ]}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.semanticIndex} hint={t.settings.semanticIndexHint}>
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-3">
+        <Row label={t.settings.semanticIndex} hint={t.settings.semanticIndexHint}>
+            <div className="w-full space-y-2 text-right">
+              <div className="flex flex-wrap items-center justify-end gap-3">
                 <span className="text-sm text-fg-muted">
                   {semanticIndexStatusLabel(server, t)}
                 </span>
@@ -934,60 +889,57 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               {rebuildMessage && <p className="text-xs text-fg-muted">{rebuildMessage}</p>}
               {rebuildError && <p className="text-xs text-danger">{rebuildError}</p>}
             </div>
-          </Row>
-        </div>
+        </Row>
+      </div>
+    </Section>
+  );
+}
 
-        <div className="space-y-4 border-t border-border pt-5">
-          <div className="text-xs font-semibold text-fg-muted">
-            {t.settings.documentVisionGroup}
-          </div>
-
-          <Row label={t.settings.documentVisionEnabled} hint={t.settings.documentVisionEnabledHint}>
-            <Switch
-              size="small"
-              checked={server.document_vision_enabled}
-              onChange={(checked) => setServerBoolean("document_vision_enabled", checked)}
-            />
-          </Row>
-        </div>
-
-        <div className="space-y-4 border-t border-border pt-5">
-          <div className="text-xs font-semibold text-fg-muted">
-            {t.settings.rerankGroup}
-          </div>
-
-          <Row label={t.settings.rerankEnabled} hint={t.settings.rerankEnabledHint}>
+function RerankSection({ ctx }: { ctx: ServerCtx }) {
+  const { server, setServerBoolean, setServerNumber, setServerString, setServerSecret } = ctx;
+  const { t } = useI18n();
+  if (!server) {
+    return (
+      <Section id="rerank" title={t.settings.rerankGroup} subtitle={t.settings.rerankSubtitle}>
+        <p className="text-sm text-fg-subtle">{t.common.loading}</p>
+      </Section>
+    );
+  }
+  return (
+    <Section id="rerank" title={t.settings.rerankGroup} subtitle={t.settings.rerankSubtitle}>
+      <div className="space-y-5">
+        <Row label={t.settings.rerankEnabled} hint={t.settings.rerankEnabledHint}>
             <Switch
               size="small"
               checked={server.rerank_enabled}
               onChange={(checked) => setServerBoolean("rerank_enabled", checked)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankApiKey} hint={t.llm.keepKeyHint}>
+        <Row label={t.settings.rerankApiKey} hint={t.llm.keepKeyHint}>
             <SecretInput
               configured={server.rerank_api_key_set}
               onCommit={(v) => setServerSecret("rerank_api_key", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankBaseUrl}>
+        <Row label={t.settings.rerankBaseUrl}>
             <TextInput
               value={server.rerank_base_url}
               className="w-72"
               onCommit={(v) => setServerString("rerank_base_url", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankModel}>
+        <Row label={t.settings.rerankModel}>
             <TextInput
               value={server.rerank_model}
               className="w-48"
               onCommit={(v) => setServerString("rerank_model", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankTopN}>
+        <Row label={t.settings.rerankTopN}>
             <NumberInput
               value={server.rerank_top_n}
               min={1}
@@ -996,9 +948,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-20"
               onCommit={(v) => setServerNumber("rerank_top_n", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankMaxDocChars}>
+        <Row label={t.settings.rerankMaxDocChars}>
             <NumberInput
               value={server.rerank_max_doc_chars}
               min={1}
@@ -1007,9 +959,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-24"
               onCommit={(v) => setServerNumber("rerank_max_doc_chars", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.rerankConcurrency}>
+        <Row label={t.settings.rerankConcurrency}>
             <NumberInput
               value={server.rerank_concurrency}
               min={1}
@@ -1018,9 +970,9 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               className="w-16"
               onCommit={(v) => setServerNumber("rerank_concurrency", v)}
             />
-          </Row>
+        </Row>
 
-          <Row label={t.settings.evidenceSelection} hint={t.settings.evidenceSelectionHint}>
+        <Row label={t.settings.evidenceSelection} hint={t.settings.evidenceSelectionHint}>
             <Select
               size="small"
               value={server.evidence_selection}
@@ -1031,8 +983,59 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
                 { value: "rerank", label: "rerank" },
               ]}
             />
-          </Row>
-        </div>
+        </Row>
+      </div>
+    </Section>
+  );
+}
+
+function IngestSection({ ctx }: { ctx: ServerCtx }) {
+  const { server, setDefaultConflict, setServerNumber, setServerBoolean } = ctx;
+  const { t } = useI18n();
+  return (
+    <Section id="ingest" title={t.settings.ingestTitle} subtitle={t.settings.ingestSubtitle}>
+      <div className="space-y-5">
+        <Row label={t.settings.conflictPolicy} hint={t.settings.conflictHint}>
+          <Select
+            size="small"
+            value={server?.default_on_conflict ?? "rename"}
+            disabled={!server}
+            onChange={(v) => setDefaultConflict(v as OnConflict)}
+            options={[
+              { value: "rename", label: t.settings.conflictRename },
+              { value: "error", label: t.settings.conflictError },
+              { value: "skip", label: t.settings.conflictSkip },
+            ]}
+          />
+        </Row>
+        <Row label={t.settings.concurrentIngest} hint={t.settings.concurrentIngestHint}>
+          <NumberInput
+            value={server?.worker_batch_size}
+            disabled={!server}
+            min={1}
+            max={32}
+            step={1}
+            onCommit={(v) => setServerNumber("worker_batch_size", v)}
+          />
+        </Row>
+        <Row label={t.settings.ingestLlmConcurrency} hint={t.settings.ingestLlmConcurrencyHint}>
+          <NumberInput
+            value={server?.llm_ingest_concurrency}
+            disabled={!server}
+            min={1}
+            max={32}
+            step={1}
+            onCommit={(v) => setServerNumber("llm_ingest_concurrency", v)}
+          />
+        </Row>
+        <Row label={t.settings.documentVisionEnabled} hint={t.settings.documentVisionEnabledHint}>
+          <Switch
+            size="small"
+            checked={Boolean(server?.document_vision_enabled)}
+            disabled={!server}
+            onChange={(checked) => setServerBoolean("document_vision_enabled", checked)}
+          />
+        </Row>
       </div>
     </Section>
   );
@@ -1046,7 +1049,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
 
   if (err) {
     return (
-      <Section title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
+      <Section id="server-status" title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
         <p className="text-sm text-danger">{t.settings.backendUnreachable(err)}</p>
       </Section>
     );
@@ -1054,7 +1057,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
 
   if (!server || !llm) {
     return (
-      <Section title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
+      <Section id="server-status" title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
         <p className="text-sm text-fg-subtle">{t.common.loading}</p>
       </Section>
     );
@@ -1117,34 +1120,67 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
 
 // ---- shared bits -----------------------------------------------------------
 
-function SettingsNav({ items }: { items: { id: string; label: string }[] }) {
+interface SettingsNavGroup {
+  label: string;
+  items: { id: string; label: string }[];
+}
+
+function SettingsNav({ groups }: { groups: SettingsNavGroup[] }) {
   const { t } = useI18n();
   return (
     <aside className="hidden w-44 shrink-0 lg:block">
-      <div className="sticky top-8 space-y-0.5">
-        <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+      <div className="sticky top-8">
+        <div className="mb-4 px-2 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
           {t.settings.title}
         </div>
-        <nav className="flex flex-col">
-          {items.map((it) => (
-            <Button
-              key={it.id}
-              type="text"
-              size="small"
-              onClick={() =>
-                document
-                  .getElementById(it.id)
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-              className="h-auto w-full px-2 py-1 text-sm text-fg-muted"
-              style={{ justifyContent: "flex-start", textAlign: "left" }}
-            >
-              {it.label}
-            </Button>
+        <nav className="space-y-4">
+          {groups.map((group) => (
+            <div key={group.label}>
+              <div className="mb-1 px-2 text-[11px] font-medium text-fg-subtle">
+                {group.label}
+              </div>
+              <div className="flex flex-col">
+                {group.items.map((item) => (
+                  <Button
+                    key={item.id}
+                    type="text"
+                    size="small"
+                    onClick={() =>
+                      document
+                        .getElementById(item.id)
+                        ?.scrollIntoView({ behavior: "smooth", block: "start" })
+                    }
+                    className="h-auto w-full px-2 py-1 text-sm text-fg-muted"
+                    style={{ justifyContent: "flex-start", textAlign: "left" }}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
       </div>
     </aside>
+  );
+}
+
+function SettingsCategory({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-3 border-b border-border pb-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+          {title}
+        </h2>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </section>
   );
 }
 
@@ -1161,7 +1197,7 @@ function Section({
 }) {
   return (
     <section id={id} className="scroll-mt-8 rounded-md border border-border bg-bg-subtle p-4">
-      <h2 className="text-sm font-semibold">
+      <h3 className="text-sm font-semibold">
         {title}
         {subtitle && (
           <Tooltip title={subtitle}>
@@ -1170,7 +1206,7 @@ function Section({
             </span>
           </Tooltip>
         )}
-      </h2>
+      </h3>
       <div className="mt-4">{children}</div>
     </section>
   );
@@ -1199,7 +1235,15 @@ function Row({
           )}
         </div>
       </div>
-      <div className="shrink-0">{children}</div>
+      <div
+        className={cn(
+          "flex w-72 max-w-[58%] shrink-0 justify-end",
+          "[&>.ant-input]:!w-full [&>.ant-input-affix-wrapper]:!w-full",
+          "[&>.ant-input-number]:!w-full [&>.ant-select]:!w-full",
+        )}
+      >
+        {children}
+      </div>
     </div>
   );
 }
@@ -1274,22 +1318,18 @@ function NumberInput({
   };
 
   return (
-    <input
-      type="number"
+    <InputNumber
+      size="small"
       min={min}
       max={max}
       step={step}
-      value={draft}
+      value={draft ? Number(draft) : null}
       disabled={disabled}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(next) => setDraft(next == null ? "" : String(next))}
       onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-      }}
-      className={cn(
-        "rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs disabled:opacity-50",
-        className,
-      )}
+      onPressEnter={(e) => e.currentTarget.blur()}
+      className={className}
+      classNames={{ input: "text-right font-mono text-xs" }}
     />
   );
 }
@@ -1320,18 +1360,14 @@ function TextInput({
   };
 
   return (
-    <input
+    <Input
+      size="small"
       value={draft}
       disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-      }}
-      className={cn(
-        "rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs disabled:opacity-50",
-        className,
-      )}
+      onPressEnter={(e) => e.currentTarget.blur()}
+      className={cn("font-mono text-xs", className)}
     />
   );
 }
@@ -1362,27 +1398,28 @@ function SecretInput({
   };
 
   return (
-    <div className="flex items-center gap-2">
-      <input
-        type="password"
-        value={draft}
-        disabled={disabled || saving}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void commit();
-        }}
-        placeholder={configured ? t.settings.secretConfigured : t.common.unset}
-        className="w-48 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs disabled:opacity-50"
-      />
-      <Button
-        type="text"
-        size="small"
-        title={t.common.save}
-        icon={<Save size={13} />}
-        onClick={() => void commit()}
-        disabled={disabled || saving || !draft.trim()}
-      />
-    </div>
+    <Input.Password
+      size="small"
+      value={draft}
+      disabled={disabled || saving}
+      onChange={(e) => setDraft(e.target.value)}
+      onPressEnter={() => void commit()}
+      placeholder={configured ? t.settings.secretConfigured : t.common.unset}
+      className="w-full font-mono text-xs"
+      suffix={(
+        <Button
+          type="text"
+          size="small"
+          title={t.common.save}
+          aria-label={t.common.save}
+          icon={<Save size={12} />}
+          loading={saving}
+          onClick={() => void commit()}
+          disabled={disabled || saving || !draft.trim()}
+          style={{ width: 20, height: 20, minWidth: 20, padding: 0 }}
+        />
+      )}
+    />
   );
 }
 

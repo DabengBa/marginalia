@@ -14,7 +14,9 @@ import { AboutPage } from "@/pages/AboutPage";
 import { useI18n } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
 import { useAntdTheme } from "@/lib/antdTheme";
-import { ConfigProvider } from "antd";
+import { App as AntdApp, ConfigProvider } from "antd";
+import enUS from "antd/locale/en_US";
+import zhCN from "antd/locale/zh_CN";
 
 function isTauri(): boolean {
   return Boolean(
@@ -42,32 +44,34 @@ export default function App() {
   }, [locale]);
 
   return (
-    <ConfigProvider theme={antdTheme}>
-      <BackendGate>
-      <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <Sidebar />
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            <TopBar />
-            <main className="min-h-0 flex-1 overflow-hidden">
-              <Routes>
-                <Route path="/" element={<Navigate to="/chat" replace />} />
-                <Route path="/library/*" element={<LibraryPage />} />
-                <Route path="/chat" element={<ChatPage />} />
-                <Route path="/search" element={<SearchPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/help" element={<HelpPage />} />
-                <Route path="/about" element={<AboutPage />} />
-                {/* Safety net: stray hash fragments (e.g. an unresolved
-                    in-answer "#foo" anchor) must not blank the pane. */}
-                <Route path="*" element={<Navigate to="/chat" replace />} />
-              </Routes>
-            </main>
+    <ConfigProvider theme={antdTheme} locale={locale === "zh" ? zhCN : enUS}>
+      <AntdApp className="h-full">
+        <BackendGate>
+          <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              <Sidebar />
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                <TopBar />
+                <main className="min-h-0 flex-1 overflow-hidden">
+                  <Routes>
+                    <Route path="/" element={<Navigate to="/chat" replace />} />
+                    <Route path="/library/*" element={<LibraryPage />} />
+                    <Route path="/chat" element={<ChatPage />} />
+                    <Route path="/search" element={<SearchPage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                    <Route path="/help" element={<HelpPage />} />
+                    <Route path="/about" element={<AboutPage />} />
+                    {/* Safety net: stray hash fragments (e.g. an unresolved
+                        in-answer "#foo" anchor) must not blank the pane. */}
+                    <Route path="*" element={<Navigate to="/chat" replace />} />
+                  </Routes>
+                </main>
+              </div>
+            </div>
+            <StatusBar />
           </div>
-        </div>
-        <StatusBar />
-      </div>
-      </BackendGate>
+        </BackendGate>
+      </AntdApp>
     </ConfigProvider>
   );
 }

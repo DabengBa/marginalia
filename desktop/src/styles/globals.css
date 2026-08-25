@@ -49,8 +49,8 @@
 }
 
 /* Light/dark surface tokens — single source of truth for the palette.
- * Tailwind reads these via `rgb(var(--token) / <alpha-value>)` so we
- * keep utility opacity modifiers (e.g. `bg-bg-elevated/80`).
+ * Tailwind 4 derives opacity variants from these theme colors, so utilities
+ * such as `bg-bg-elevated/80` continue to work without a JS config file.
  *
  * Inspired by Linear/Vercel: cool neutrals, single accent, restraint
  * over saturation. Don't add a second accent without a reason.

@@ -17,7 +17,8 @@ import { sessions as sessionsApi } from "@/api/client";
 import type { SessionListEntry } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
-import { Button } from "antd";
+import { confirmAction } from "@/lib/antdFeedback";
+import { App as AntdApp, Button } from "antd";
 
 interface Props {
   activeSessionId: string | null;
@@ -33,6 +34,7 @@ export function SessionList({
   const [err, setErr] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const { t, localeTag } = useI18n();
+  const { modal } = AntdApp.useApp();
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +47,12 @@ export function SessionList({
 
   const handleDelete = useCallback(async (entry: SessionListEntry) => {
     const label = entry.preview ? `"${entry.preview.slice(0, 60)}"` : t.common.emptyName;
-    if (!confirm(t.chat.deleteConfirm(label))) return;
+    const confirmed = await confirmAction(modal.confirm, t.chat.deleteConfirm(label), {
+      okText: t.common.delete,
+      cancelText: t.common.cancel,
+      okButtonProps: { danger: true },
+    });
+    if (!confirmed) return;
 
     setDeletingId(entry.session_id);
     setErr(null);
@@ -60,7 +67,7 @@ export function SessionList({
     } finally {
       setDeletingId(null);
     }
-  }, [activeSessionId, onNewChat, t]);
+  }, [activeSessionId, modal, onNewChat, t]);
 
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border bg-bg-subtle">
@@ -131,40 +138,44 @@ function SessionRow({
           : "text-fg-muted hover:bg-bg-muted hover:text-fg-base",
       )}
     >
-      <button
+      <Button
+        type="text"
         onClick={onClick}
-        className="flex min-w-0 flex-1 items-start gap-2 text-left"
+        className="h-auto min-w-0 flex-1 justify-start p-0 text-left"
         title={preview}
       >
-        <MessageSquare size={12} className="mt-0.5 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1">
-            <div className="truncate font-medium">{preview}</div>
-            {closed && <Lock size={9} className="shrink-0 text-fg-subtle" />}
-          </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[10.5px] text-fg-subtle">
-            <span>{when}</span>
-            <span>·</span>
-            <span>{t.chat.turn(entry.turn_count)}</span>
-          </div>
-        </div>
-      </button>
-      <button
+        <span className="flex min-w-0 flex-1 items-start gap-2">
+          <MessageSquare size={12} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1">
+              <span className="truncate font-medium">{preview}</span>
+              {closed && <Lock size={9} className="shrink-0 text-fg-subtle" />}
+            </span>
+            <span className="mt-0.5 flex items-center gap-2 text-[10.5px] text-fg-subtle">
+              <span>{when}</span>
+              <span>·</span>
+              <span>{t.chat.turn(entry.turn_count)}</span>
+            </span>
+          </span>
+        </span>
+      </Button>
+      <Button
+        type="text"
+        danger
+        size="small"
         onClick={(e) => { e.stopPropagation(); onDelete(); }}
         disabled={deleting}
+        loading={deleting}
         title={t.chat.deleteSessionTitle}
         aria-label={t.chat.deleteSessionTitle}
+        icon={deleting ? undefined : <Trash2 size={11} />}
         className={cn(
-          "shrink-0 self-center rounded p-1 text-fg-subtle transition-opacity",
-          "hover:bg-bg-base hover:text-danger",
+          "shrink-0 self-center p-0 transition-opacity",
           "opacity-0 group-hover:opacity-100 focus:opacity-100",
           deleting && "opacity-100",
         )}
-      >
-        {deleting
-          ? <Loader2 size={11} className="animate-spin" />
-          : <Trash2 size={11} />}
-      </button>
+        style={{ width: 24, height: 24, minWidth: 24 }}
+      />
     </div>
   );
 }

@@ -12,13 +12,12 @@
  *  is set. Typing replaces it; leaving it blank keeps whatever's
  *  already configured. */
 import { useEffect, useMemo, useState } from "react";
-import { Save, RotateCcw, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { Save, RotateCcw, CheckCircle2, XCircle } from "lucide-react";
+import { Button, Input, InputNumber, Select } from "antd";
 
 import { settings as settingsApi } from "@/api/client";
 import type { LlmTestResult } from "@/api/client";
-import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Input, InputNumber, Select } from "antd";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
@@ -72,17 +71,13 @@ export function LlmProfileEditor({ data, onChange }: Props) {
       ))}
 
       <div className="flex items-center justify-end">
-        <button
+        <Button
+          size="small"
           onClick={runTest}
-          disabled={testing}
-          className={cn(
-            "flex items-center gap-1.5 rounded border border-border px-2.5 py-1 text-xs font-medium",
-            "hover:bg-bg-subtle disabled:opacity-40",
-          )}
+          loading={testing}
         >
-          {testing && <Loader2 size={12} className="animate-spin" />}
           {testing ? t.llm.testing : t.llm.testConnection}
-        </button>
+        </Button>
       </div>
 
       {testErr && (
@@ -256,38 +251,44 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
 
   return (
     <div className="rounded-md border border-border bg-bg-base">
-      <button
+      <Button
+        type="text"
+        block
         onClick={onToggle}
-        className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-bg-subtle"
+        className="h-auto px-3 py-2 text-left"
+        style={{ justifyContent: "space-between" }}
       >
-        <div className="flex items-center gap-3">
-          <span className="font-medium capitalize">{name}</span>
-          <span className="font-mono text-xs text-fg-subtle">
-            {view.provider || view.model
-              ? `${view.provider ?? t.common.unset}/${view.model || t.common.unset}`
-              : t.common.unset}
+        <span className="flex w-full items-center justify-between">
+          <span className="flex items-center gap-3">
+            <span className="font-medium capitalize">{name}</span>
+            <span className="font-mono text-xs text-fg-subtle">
+              {view.provider || view.model
+                ? `${view.provider ?? t.common.unset}/${view.model || t.common.unset}`
+                : t.common.unset}
+            </span>
           </span>
-        </div>
-        <span className="text-xs text-fg-subtle">
-          {overrideCount > 0
-            ? t.llm.override(overrideCount)
-            : optional
-              ? view.model || view.api_key_set
-                ? t.llm.fromEnv
-                : t.common.notConfigured
-              : isDefault
-                ? view.api_key_set
+          <span className="text-xs text-fg-subtle">
+            {overrideCount > 0
+              ? t.llm.override(overrideCount)
+              : optional
+                ? view.model || view.api_key_set
                   ? t.llm.fromEnv
                   : t.common.notConfigured
-                : t.llm.inherited}
+                : isDefault
+                  ? view.api_key_set
+                    ? t.llm.fromEnv
+                    : t.common.notConfigured
+                  : t.llm.inherited}
+          </span>
         </span>
-      </button>
+      </Button>
 
       {isOpen && (
         <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
           <Field label={t.llm.provider}>
             <Select
               size="small"
+              className="w-full"
               value={form.provider || undefined}
               allowClear
               placeholder={
@@ -325,7 +326,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : t.common.inherit(data.defaults.model)
               }
-              className="font-mono"
+              className="w-full font-mono"
             />
           </Field>
           <Field label={t.llm.baseUrl}>
@@ -344,7 +345,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : data.defaults.base_url || t.common.providerDefault
               }
-              className="font-mono"
+              className="w-full font-mono"
             />
           </Field>
 
@@ -358,7 +359,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                   ? t.common.setValue(view.api_key ?? "")
                   : t.common.unset
               }
-              className="font-mono"
+              className="w-full font-mono"
             />
             <p className="mt-1 text-xs text-fg-subtle">
               {t.llm.keepKeyHint}
@@ -400,24 +401,26 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           )}
 
           <div className="flex items-center justify-between pt-1">
-            <button
+            <Button
+              type="text"
+              size="small"
               onClick={reset}
               disabled={saving || overrideCount === 0}
-              className="flex items-center gap-1 text-xs text-fg-subtle hover:text-fg-base disabled:opacity-40"
+              icon={<RotateCcw size={11} />}
+              className="px-1 text-xs text-fg-subtle"
             >
-              <RotateCcw size={11} /> {t.llm.reset}
-            </button>
-            <button
+              {t.llm.reset}
+            </Button>
+            <Button
+              type="primary"
+              size="small"
               onClick={save}
               disabled={!dirty || saving}
-              className={cn(
-                "flex items-center gap-1.5 rounded bg-accent px-3 py-1 text-xs font-medium text-accent-fg",
-                "hover:opacity-90 disabled:opacity-40",
-              )}
+              loading={saving}
+              icon={<Save size={11} />}
             >
-              {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
               {t.common.save}
-            </button>
+            </Button>
           </div>
           {savedAt && !saving && (
             <p className="text-right text-xs text-fg-subtle">
@@ -437,7 +440,13 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block">
+    <label
+      className={[
+        "block",
+        "[&>.ant-input]:!w-full [&>.ant-input-affix-wrapper]:!w-full",
+        "[&>.ant-input-number]:!w-full [&>.ant-select]:!w-full",
+      ].join(" ")}
+    >
       <span className="mb-1 block text-xs font-medium text-fg-muted">{label}</span>
       {children}
     </label>
@@ -459,6 +468,7 @@ function CapabilitySelect({
     <Field label={label}>
       <Select
         size="small"
+        className="w-full"
         value={value || undefined}
         allowClear
         placeholder={String(inherited)}

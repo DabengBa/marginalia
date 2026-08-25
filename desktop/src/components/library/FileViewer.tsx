@@ -136,9 +136,15 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
             {t.library.hydrateFromWebDav}
           </Button>
         ) : (
-          <a href={downloadUrl} download onClick={(e) => maybeAuthDownload(e, downloadUrl, name)} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
-            <Download size={12} /> {t.library.download}
-          </a>
+          <Button
+            size="small"
+            href={downloadUrl}
+            download={name}
+            onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
+            icon={<Download size={12} />}
+          >
+            {t.library.download}
+          </Button>
         )}
       </header>
       <div className="flex-1 overflow-hidden">

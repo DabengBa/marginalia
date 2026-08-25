@@ -30,6 +30,7 @@ import {
   CHAT_IMAGE_MAX_COUNT, CHAT_IMAGE_MAX_BYTES, type PendingChatImage,
 } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
+import { Button, Input, Segmented } from "antd";
 
 /** Module-level in-flight SSE streams.
  *  Not tied to component lifecycle so streams survive navigation and
@@ -426,15 +427,17 @@ export function ChatPage() {
                         alt={img.name ?? i18n.chat.imageAlt(1)}
                         className="h-full w-full object-cover"
                       />
-                      <button
-                        type="button"
+                      <Button
+                        type="text"
+                        danger
+                        size="small"
                         onClick={() => removeImage(img.id)}
                         title={i18n.chat.removeImage}
                         aria-label={i18n.chat.removeImage}
-                        className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-bg-base/85 text-fg-muted shadow-sm hover:text-danger"
-                      >
-                        <X size={11} />
-                      </button>
+                        icon={<X size={11} />}
+                        className="absolute right-0.5 top-0.5 bg-bg-base/85 shadow-sm"
+                        style={{ width: 16, height: 16, minWidth: 16, padding: 0 }}
+                      />
                     </div>
                   ))}
                 </div>
@@ -447,59 +450,22 @@ export function ChatPage() {
               )}
             </div>
           )}
-          <div className="mx-auto flex max-w-5xl items-end gap-2">
-            <div
-              className="flex h-9 shrink-0 overflow-hidden rounded-md border border-border bg-bg-base p-0.5"
+          <div className="mx-auto grid max-w-5xl grid-cols-[auto_minmax(0,1fr)_auto] items-end gap-2 max-[1100px]:grid-cols-[minmax(0,1fr)_auto]">
+            <Segmented<ChatMode>
               aria-label={i18n.chat.mode}
-              role="group"
-            >
-              <button
-                type="button"
-                title={i18n.chat.autoModeHint}
-                disabled={streaming}
-                onClick={() => setChatMode("auto")}
-                className={cn(
-                  "flex h-8 w-16 items-center justify-center gap-1 rounded-[4px] text-xs transition-colors",
-                  chatMode === "auto"
-                    ? "bg-accent text-accent-fg"
-                    : "text-fg-muted hover:bg-bg-muted",
-                  streaming && "cursor-not-allowed opacity-60",
-                )}
-              >
-                <Gauge size={13} /> {i18n.chat.autoMode}
-              </button>
-              <button
-                type="button"
-                title={i18n.chat.quickModeHint}
-                disabled={streaming}
-                onClick={() => setChatMode("quick")}
-                className={cn(
-                  "flex h-8 w-16 items-center justify-center gap-1 rounded-[4px] text-xs transition-colors",
-                  chatMode === "quick"
-                    ? "bg-accent text-accent-fg"
-                    : "text-fg-muted hover:bg-bg-muted",
-                  streaming && "cursor-not-allowed opacity-60",
-                )}
-              >
-                <Zap size={13} /> {i18n.chat.quickMode}
-              </button>
-              <button
-                type="button"
-                title={i18n.chat.deepModeHint}
-                disabled={streaming}
-                onClick={() => setChatMode("deep")}
-                className={cn(
-                  "flex h-8 w-16 items-center justify-center gap-1 rounded-[4px] text-xs transition-colors",
-                  chatMode === "deep"
-                    ? "bg-accent text-accent-fg"
-                    : "text-fg-muted hover:bg-bg-muted",
-                  streaming && "cursor-not-allowed opacity-60",
-                )}
-              >
-                <Sparkles size={13} /> {i18n.chat.deepMode}
-              </button>
-            </div>
-            <textarea
+              value={chatMode}
+              disabled={streaming}
+              onChange={setChatMode}
+              size="small"
+              className="shrink-0 max-[1100px]:col-span-2 max-[1100px]:justify-self-start"
+              classNames={{ item: "w-16", label: "text-xs" }}
+              options={[
+                { value: "auto", label: i18n.chat.autoMode, icon: <Gauge size={13} />, tooltip: i18n.chat.autoModeHint },
+                { value: "quick", label: i18n.chat.quickMode, icon: <Zap size={13} />, tooltip: i18n.chat.quickModeHint },
+                { value: "deep", label: i18n.chat.deepMode, icon: <Sparkles size={13} />, tooltip: i18n.chat.deepModeHint },
+              ]}
+            />
+            <Input.TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onPaste={handlePaste}
@@ -510,34 +476,25 @@ export function ChatPage() {
                 }
               }}
               placeholder={i18n.chat.inputPlaceholder}
-              rows={1}
-              className={cn(
-                "flex-1 resize-none rounded-md border border-border bg-bg-base px-3 py-2 text-sm",
-                "outline-none transition-colors focus:border-accent",
-                "placeholder:text-fg-subtle",
-                "max-h-40",
-              )}
+              autoSize={{ minRows: 1, maxRows: 10 }}
+              className="min-w-0 text-sm"
             />
             {streaming ? (
-              <button
+              <Button
                 onClick={stop}
-                className="flex h-9 items-center gap-1 rounded-md border border-border bg-bg-elevated px-3 text-sm hover:bg-bg-muted"
+                icon={<Square size={13} fill="currentColor" />}
               >
-                <Square size={13} fill="currentColor" /> {i18n.chat.stop}
-              </button>
+                {i18n.chat.stop}
+              </Button>
             ) : (
-              <button
+              <Button
+                type="primary"
                 onClick={send}
                 disabled={(!input.trim() && pendingImages.length === 0) || loading}
-                className={cn(
-                  "flex h-9 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors",
-                  (input.trim() || pendingImages.length > 0) && !loading
-                    ? "bg-accent text-accent-fg hover:opacity-90"
-                    : "cursor-not-allowed bg-bg-muted text-fg-subtle",
-                )}
+                icon={<Send size={13} />}
               >
-                <Send size={13} /> {i18n.chat.send}
-              </button>
+                {i18n.chat.send}
+              </Button>
             )}
           </div>
           <div className="mx-auto mt-1 max-w-3xl text-[11px] text-fg-subtle">

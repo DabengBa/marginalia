@@ -150,16 +150,19 @@ function LatestVersionResult({ state }: { state: CheckState }) {
         {published && (
           <p className="mt-0.5 text-fg-muted">{t.about.publishedAt(published)}</p>
         )}
-        <a
+        <Button
+          type="link"
+          size="small"
           href={state.release.html_url || RELEASES_URL}
           target="_blank"
           rel="noreferrer"
           onClick={(e) => interceptExternalLink(e, state.release.html_url || RELEASES_URL)}
-          className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
+          icon={<ExternalLink className="h-3 w-3" />}
+          iconPlacement="end"
+          className="mt-1 h-auto px-0 text-xs"
         >
           {t.about.openLatestRelease}
-          <ExternalLink className="h-3 w-3" />
-        </a>
+        </Button>
       </div>
     </div>
   );
@@ -173,16 +176,18 @@ function ExternalLinkButton({
   children: React.ReactNode;
 }) {
   return (
-    <a
+    <Button
+      block
       href={href}
       target="_blank"
       rel="noreferrer"
       onClick={(e) => interceptExternalLink(e, href)}
-      className="inline-flex items-center justify-between gap-2 rounded-md border border-border bg-bg-base px-3 py-2 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg-base"
+      icon={<ExternalLink className="h-3.5 w-3.5 shrink-0" />}
+      iconPlacement="end"
+      className="h-auto justify-between px-3 py-2 text-sm text-fg-muted"
     >
-      <span>{children}</span>
-      <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-    </a>
+      {children}
+    </Button>
   );
 }
 
