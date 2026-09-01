@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 0.3.7 - 2026-09-01
+
 ### Changed
 
+- The desktop interface now uses Ant Design components and Tailwind CSS v4
+  throughout, with reorganized settings groups, consistent theme integration,
+  and migrated dialogs, viewers, navigation, and action controls.
 - LLM profiles now expose only provider, endpoint, model, context window, and
   genuine model capabilities. The internal model registry resolves compatible
   request adapters, token counters, reasoning controls, and output-token field
