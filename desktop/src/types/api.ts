@@ -653,6 +653,7 @@ export type LlmProfileName =
 
 export interface LlmProfileResolved {
   provider: string | null;
+  adapter: string;
   api_key: string | null;
   api_key_set: boolean;
   base_url: string | null;
@@ -662,13 +663,10 @@ export interface LlmProfileResolved {
 }
 
 export interface LlmModelCapabilities {
-  dialect: string;
   context_window: number;
-  tokenizer: string;
   supports_vision: boolean;
   supports_tools: boolean;
   supports_temperature: boolean;
-  token_limit_param: "max_tokens" | "max_completion_tokens";
 }
 
 export interface LlmSettings {
@@ -676,6 +674,7 @@ export interface LlmSettings {
   overlay: Record<string, string | number | boolean | null>;
   defaults: {
     provider: string;
+    adapter: string;
     model: string;
     base_url: string | null;
     api_key: string | null;

@@ -303,10 +303,11 @@ semantic 向量。
 恢复 ingest；重复上传已就绪内容时会排单文件 semantic 刷新。只有 provider、
 model、维度和章节文本 hash 都与当前 embedding 配置一致时，刷新才会复用旧向量。
 
-每个 LLM profile 都可以显式声明请求方言、上下文窗口、tokenizer、图片/工具/
-temperature 能力和输出 token 参数名，设置界面也可编辑这些字段；运行时不再
-根据网关 URL 猜测方言。超过模型窗口的会话请求会按 token 压缩为结构化
-checkpoint，但数据库中的原始 turn 不变；`CONVERSATION_COMPACTION_*` 与证据
+每个 LLM profile 只需声明 provider、endpoint、model、上下文窗口和真实的
+图片/工具/temperature 能力。内部 model registry 自动解析请求 adapter、本地
+token counter 和 provider 输出上限字段；已知兼容端点使用专用 adapter，未知
+端点回退到通用 OpenAI-compatible 路径。超过模型窗口的会话请求会按 token
+压缩为结构化 checkpoint，但数据库中的原始 turn 不变；`CONVERSATION_COMPACTION_*` 与证据
 压缩完全独立。会话指标还会按 `AGENT_CACHE_SLO_*` 阈值输出缓存 SLO 的
 `met`、`breached` 或 `insufficient_data` 三态结果。
 

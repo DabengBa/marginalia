@@ -235,7 +235,9 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
     client = get_chat_client("reflect")
     capabilities = getattr(client, "capabilities", None)
     if capabilities is not None:
-        counter = TokenCounter(capabilities.tokenizer)
+        counter = TokenCounter(
+            getattr(client, "token_counter_id", "utf8_upper_bound")
+        )
         prefix_tokens = counter.messages(snapshot_messages)
         message_budget = (
             int(capabilities.context_window)

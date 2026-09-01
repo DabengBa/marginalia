@@ -178,17 +178,12 @@ class Settings(BaseSettings):
     llm_default_base_url: str | None = None
     llm_default_model: str = "gpt-4o-mini"
     llm_default_tps: int = Field(default=10, ge=1, le=10_000)
-    # Operator-declared model capabilities. The request dialect is inferred
-    # only from the provider family when omitted, never from a gateway URL.
-    llm_default_dialect: str | None = None
+    # Operators declare genuine model capabilities. Request adapters, local
+    # token counters, and provider field names are resolved internally.
     llm_default_context_window: int = Field(default=128_000, ge=1_024)
-    llm_default_tokenizer: str = "o200k_base"
     llm_default_supports_vision: bool = True
     llm_default_supports_tools: bool = True
     llm_default_supports_temperature: bool = True
-    llm_default_token_limit_param: Literal[
-        "max_tokens", "max_completion_tokens"
-    ] = "max_tokens"
 
     # --- Per-profile overrides (chat / reflect / ingest / vision / audio) ---
     # Any field left blank inherits the corresponding `llm_default_*` value.
@@ -199,60 +194,40 @@ class Settings(BaseSettings):
     llm_chat_base_url: str | None = None
     llm_chat_model: str | None = None
     llm_chat_tps: int = Field(default=10, ge=1, le=10_000)
-    llm_chat_dialect: str | None = None
     llm_chat_context_window: int | None = Field(default=None, ge=1_024)
-    llm_chat_tokenizer: str | None = None
     llm_chat_supports_vision: bool | None = None
     llm_chat_supports_tools: bool | None = None
     llm_chat_supports_temperature: bool | None = None
-    llm_chat_token_limit_param: Literal[
-        "max_tokens", "max_completion_tokens"
-    ] | None = None
 
     llm_reflect_provider: LlmProvider | None = None
     llm_reflect_api_key: str | None = None
     llm_reflect_base_url: str | None = None
     llm_reflect_model: str | None = None
     llm_reflect_tps: int = Field(default=10, ge=1, le=10_000)
-    llm_reflect_dialect: str | None = None
     llm_reflect_context_window: int | None = Field(default=None, ge=1_024)
-    llm_reflect_tokenizer: str | None = None
     llm_reflect_supports_vision: bool | None = None
     llm_reflect_supports_tools: bool | None = None
     llm_reflect_supports_temperature: bool | None = None
-    llm_reflect_token_limit_param: Literal[
-        "max_tokens", "max_completion_tokens"
-    ] | None = None
 
     llm_ingest_provider: LlmProvider | None = None
     llm_ingest_api_key: str | None = None
     llm_ingest_base_url: str | None = None
     llm_ingest_model: str | None = None
     llm_ingest_tps: int = Field(default=10, ge=1, le=10_000)
-    llm_ingest_dialect: str | None = None
     llm_ingest_context_window: int | None = Field(default=None, ge=1_024)
-    llm_ingest_tokenizer: str | None = None
     llm_ingest_supports_vision: bool | None = None
     llm_ingest_supports_tools: bool | None = None
     llm_ingest_supports_temperature: bool | None = None
-    llm_ingest_token_limit_param: Literal[
-        "max_tokens", "max_completion_tokens"
-    ] | None = None
 
     llm_vision_provider: LlmProvider | None = None
     llm_vision_api_key: str | None = None
     llm_vision_base_url: str | None = None
     llm_vision_model: str | None = None
     llm_vision_tps: int = Field(default=10, ge=1, le=10_000)
-    llm_vision_dialect: str | None = None
     llm_vision_context_window: int | None = Field(default=None, ge=1_024)
-    llm_vision_tokenizer: str | None = None
     llm_vision_supports_vision: bool = True
     llm_vision_supports_tools: bool | None = None
     llm_vision_supports_temperature: bool | None = None
-    llm_vision_token_limit_param: Literal[
-        "max_tokens", "max_completion_tokens"
-    ] | None = None
 
     llm_audio_provider: LlmProvider | None = None  # only "openai" makes sense
     llm_audio_api_key: str | None = None
@@ -375,15 +350,12 @@ class Settings(BaseSettings):
 
 @dataclass(slots=True, frozen=True)
 class ModelCapabilities:
-    """Explicit request and context limits for one resolved model."""
+    """Genuine model capabilities exposed to the Agent runtime."""
 
-    dialect: str = "openai-compatible"
     context_window: int = 128_000
-    tokenizer: str = "o200k_base"
     supports_vision: bool = True
     supports_tools: bool = True
     supports_temperature: bool = True
-    token_limit_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
 
 
 @dataclass(slots=True, frozen=True)
@@ -394,7 +366,24 @@ class LlmProfile:
     base_url: str | None
     model: str
     tps: int = 10
+    adapter_id: str = ""
+    token_counter_id: str = ""
     capabilities: ModelCapabilities = ModelCapabilities()
+
+    def __post_init__(self) -> None:
+        if self.adapter_id and self.token_counter_id:
+            return
+        from marginalia.llm.model_registry import resolve_model_metadata
+
+        metadata = resolve_model_metadata(
+            provider=self.provider,
+            base_url=self.base_url,
+            model=self.model,
+        )
+        if not self.adapter_id:
+            object.__setattr__(self, "adapter_id", metadata.adapter_id)
+        if not self.token_counter_id:
+            object.__setattr__(self, "token_counter_id", metadata.token_counter_id)
 
 
 LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
@@ -427,7 +416,14 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
     provider = _profile_field(settings, profile, "provider")  # type: ignore[assignment]
     base_url = _profile_field(settings, profile, "base_url")  # type: ignore[assignment]
     model = _profile_field(settings, profile, "model")  # type: ignore[assignment]
-    capabilities = _resolve_model_capabilities(settings, profile, str(provider or ""))
+    from marginalia.llm.model_registry import resolve_model_metadata
+
+    metadata = resolve_model_metadata(
+        provider=str(provider or ""),
+        base_url=base_url if isinstance(base_url, str) else None,
+        model=str(model or ""),
+    )
+    capabilities = _resolve_model_capabilities(settings, profile)
     return LlmProfile(
         name=profile,
         provider=provider,  # type: ignore[arg-type]
@@ -440,6 +436,8 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
             base_url=base_url if isinstance(base_url, str) else None,
             model=str(model or ""),
         ),
+        adapter_id=metadata.adapter_id,
+        token_counter_id=metadata.token_counter_id,
         capabilities=capabilities,
     )
 
@@ -447,33 +445,17 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
 def _resolve_model_capabilities(
     settings: Settings,
     profile: str,
-    provider: str,
 ) -> ModelCapabilities:
     # Audio uses a different API and does not consume chat capability fields.
-    # Give it provider-shaped defaults without adding dead audio settings.
     if profile == "audio":
-        dialect = "anthropic" if provider == "anthropic" else (
-            "openai" if provider == "openai" else "openai-compatible"
-        )
-        return ModelCapabilities(dialect=dialect)
+        return ModelCapabilities()
 
-    dialect = _profile_field(settings, profile, "dialect")
-    if not dialect:
-        dialect = "anthropic" if provider == "anthropic" else (
-            "openai" if provider == "openai" else "openai-compatible"
-        )
-    tokenizer = str(_profile_field(settings, profile, "tokenizer") or "").strip()
     return ModelCapabilities(
-        dialect=str(dialect).strip().lower(),
         context_window=int(_profile_field(settings, profile, "context_window")),
-        tokenizer=tokenizer or "utf8_upper_bound",
         supports_vision=bool(_profile_field(settings, profile, "supports_vision")),
         supports_tools=bool(_profile_field(settings, profile, "supports_tools")),
         supports_temperature=bool(
             _profile_field(settings, profile, "supports_temperature")
-        ),
-        token_limit_param=_profile_field(  # type: ignore[arg-type]
-            settings, profile, "token_limit_param"
         ),
     )
 

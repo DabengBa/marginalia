@@ -52,6 +52,8 @@ class AnthropicChatClient(ChatClient):
         self.profile_name = profile.name
         self.provider = profile.provider
         self.model = profile.model
+        self.adapter_id = profile.adapter_id
+        self.token_counter_id = profile.token_counter_id
         self.capabilities = profile.capabilities
         self._client = get_anthropic_client(
             api_key=profile.api_key,

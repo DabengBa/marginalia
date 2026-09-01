@@ -217,7 +217,7 @@ Per-profile fields:
 
 | Field | Meaning | Recommended |
 | --- | --- | --- |
-| Provider | API dialect. | `openai-compatible` for compatible gateways and local models, `openai` for OpenAI, `anthropic` for Claude. |
+| Provider | Provider/API family. | `openai-compatible` for compatible gateways and local models, `openai` for OpenAI, `anthropic` for Claude. Request quirks are resolved automatically from the provider and endpoint. |
 | Model | Model name. | Use the exact provider or local-server model name. |
 | Base URL | Custom endpoint. | Empty for official OpenAI/Anthropic. Ollama: `http://127.0.0.1:11434/v1`. LM Studio: `http://127.0.0.1:1234/v1`. |
 | API Key | Credential sent to the model provider. | Real key for cloud services, `local` for local servers that ignore auth. |

@@ -912,10 +912,9 @@ async def run_turn(
         settings = get_settings()
         capabilities = getattr(chat, "capabilities", None)
         history_token_budget: int | None = None
-        history_tokenizer = "utf8_upper_bound"
+        history_tokenizer = getattr(chat, "token_counter_id", "utf8_upper_bound")
         if capabilities is not None:
-            history_counter = TokenCounter(capabilities.tokenizer)
-            history_tokenizer = capabilities.tokenizer
+            history_counter = TokenCounter(history_tokenizer)
             fixed_messages = [
                 *snapshot_messages,
                 ChatMessage(
@@ -1438,7 +1437,9 @@ def _fit_provider_messages(
             "conversation_tokens_after": None,
         }
 
-    counter = TokenCounter(capabilities.tokenizer)
+    counter = TokenCounter(
+        getattr(chat, "token_counter_id", "utf8_upper_bound")
+    )
     tool_payload = [
         {
             "name": tool.name,

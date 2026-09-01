@@ -31,10 +31,8 @@ from openai import BadRequestError
 
 from marginalia.config import LlmProfile
 from marginalia.llm.base import AudioClient, ChatClient
-from marginalia.llm.model_controls import (
-    apply_openai_reasoning_controls,
-    detect_openai_compatible_dialect,
-)
+from marginalia.llm.model_controls import apply_openai_reasoning_controls
+from marginalia.llm.model_registry import openai_output_token_limit_field
 from marginalia.llm.types import (
     ChatMessage,
     ChatRequest,
@@ -58,7 +56,7 @@ _OPENAI_PROVIDERS: tuple[str, ...] = ("openai", "openai-compatible")
 # every other openai-compatible endpoint an assistant string that merely
 # *contains* this markup (e.g. quoting an ingested document) must stay plain
 # text, never be executed as tool calls.
-_DSML_DIALECTS: tuple[str, ...] = ("deepseek", "thinking-type")
+_DSML_ADAPTERS: tuple[str, ...] = ("deepseek", "thinking-type")
 _DSML = r"[|｜]{2}\s*DSML\s*[|｜]{2}"
 _DSML_TOOL_CALLS_RE = re.compile(
     rf"<\s*{_DSML}\s*tool_calls\s*>(?P<body>.*?)</\s*{_DSML}\s*tool_calls\s*>",
@@ -93,9 +91,10 @@ class OpenAIChatClient(ChatClient):
         self.provider = profile.provider
         self.base_url = profile.base_url
         self.model = profile.model
+        self.adapter_id = profile.adapter_id
+        self.token_counter_id = profile.token_counter_id
         self.capabilities = profile.capabilities
         self._supports_json_schema = profile.provider == "openai"
-        self._compat_dialect = detect_openai_compatible_dialect(profile)
         self._client = get_openai_compatible_client(
             api_key=profile.api_key,
             base_url=profile.base_url,
@@ -114,7 +113,11 @@ class OpenAIChatClient(ChatClient):
             "messages": messages,
         }
         if output_limit > 0:
-            kwargs[self.capabilities.token_limit_param] = output_limit
+            field = openai_output_token_limit_field(
+                adapter_id=self.adapter_id,
+                model=self.model,
+            )
+            kwargs[field] = output_limit
         if (
             self.capabilities.supports_temperature
             and self._supports_temperature(self.model, request.reasoning_effort)
@@ -125,7 +128,7 @@ class OpenAIChatClient(ChatClient):
         apply_openai_reasoning_controls(
             kwargs,
             request,
-            dialect=self._compat_dialect,
+            adapter_id=self.adapter_id,
         )
         if request.tools:
             kwargs["tools"] = [
@@ -293,7 +296,7 @@ class OpenAIChatClient(ChatClient):
 
         text = msg.content
         # Text-mode DSML tool calls are a DeepSeek/thinking-type provider quirk.
-        # Only parse them for those dialects, only when tools were actually
+        # Only parse them for those adapters, only when tools were actually
         # offered, and only when the provider did NOT already return structured
         # tool_calls. This prevents an assistant message that merely echoes DSML
         # markup (e.g. quoting an ingested/untrusted document) from being
@@ -302,7 +305,7 @@ class OpenAIChatClient(ChatClient):
             text
             and not tool_calls
             and tools_offered
-            and self._compat_dialect in _DSML_DIALECTS
+            and self.adapter_id in _DSML_ADAPTERS
         ):
             text_tool_calls, stripped_text = _extract_dsml_tool_calls(text)
             if text_tool_calls:

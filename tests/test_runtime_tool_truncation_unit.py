@@ -135,7 +135,10 @@ def test_read_overlay_drops_invalid_persisted_values(tmp_path) -> None:
     from marginalia.services.config_overlay import read_overlay
 
     (tmp_path / "config_overlay.json").write_text(
-        '{"embedding_batch_size": 20, "semantic_recall_limit": "42"}',
+        '{"embedding_batch_size": 20, "semantic_recall_limit": "42", '
+        '"llm_default_dialect": "openrouter", '
+        '"llm_default_tokenizer": "o200k_base", '
+        '"llm_default_token_limit_param": "max_tokens"}',
         encoding="utf-8",
     )
 
@@ -143,3 +146,6 @@ def test_read_overlay_drops_invalid_persisted_values(tmp_path) -> None:
 
     assert "embedding_batch_size" not in overlay
     assert overlay["semantic_recall_limit"] == 42
+    assert "llm_default_dialect" not in overlay
+    assert "llm_default_tokenizer" not in overlay
+    assert "llm_default_token_limit_param" not in overlay

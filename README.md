@@ -259,11 +259,12 @@ from `LLM_*`; no chat or vision key is reused implicitly. Evidence selection
 defaults to `EVIDENCE_SELECTION=quota`; set `EVIDENCE_SELECTION=rerank` to take
 the reranked top evidence directly.
 
-Each LLM profile can explicitly declare its request dialect, context window,
-tokenizer, image/tool/temperature support, and accepted output-token parameter.
-The settings UI exposes these fields and the runtime does not guess a gateway
-dialect from its URL. Oversized conversation requests are compacted by model
-tokens into a structured checkpoint while stored turns remain unchanged;
+Each LLM profile declares provider, endpoint, model, context window, and genuine
+image/tool/temperature capabilities. An internal model registry resolves the
+request adapter, local token counter, and provider-specific output-limit field;
+well-known compatible endpoints receive specialized adapters and unknown ones
+use the generic OpenAI-compatible path. Oversized conversation requests are
+compacted by model tokens into a structured checkpoint while stored turns remain unchanged;
 `CONVERSATION_COMPACTION_*` controls this separately from evidence compression.
 Session metrics also classify prompt-cache SLO status as `met`, `breached`, or
 `insufficient_data` using the configurable `AGENT_CACHE_SLO_*` thresholds.

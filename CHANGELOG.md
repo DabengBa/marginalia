@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- LLM profiles now expose only provider, endpoint, model, context window, and
+  genuine model capabilities. The internal model registry resolves compatible
+  request adapters, token counters, reasoning controls, and output-token field
+  names automatically.
+
 ## 0.3.6 - 2026-08-20
 
 ### Changed

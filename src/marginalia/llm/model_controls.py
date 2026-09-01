@@ -47,7 +47,7 @@ def should_disable_thinking_by_default(profile: LlmProfile) -> bool:
     if profile.provider == "anthropic":
         return True
     if profile.provider == "openai-compatible":
-        return detect_openai_compatible_dialect(profile) != "ollama"
+        return profile.adapter_id != "ollama"
     return False
 
 
@@ -59,19 +59,15 @@ def with_disabled_thinking(request: ChatRequest) -> ChatRequest:
     return replace(request, extra_body=body)
 
 
-def detect_openai_compatible_dialect(profile: LlmProfile) -> str:
-    return profile.capabilities.dialect
-
-
 def apply_openai_reasoning_controls(
     kwargs: dict[str, Any],
     request: ChatRequest,
     *,
-    dialect: str,
+    adapter_id: str,
 ) -> None:
     extra_body = dict(request.extra_body or {})
     thinking = extra_body.pop("thinking", None)
-    if dialect == "bailian":
+    if adapter_id == "bailian":
         _apply_enable_thinking_controls(
             extra_body,
             request,
@@ -80,7 +76,7 @@ def apply_openai_reasoning_controls(
             preserve_thinking=True,
             bailian_deepseek_effort=True,
         )
-    elif dialect == "siliconflow":
+    elif adapter_id == "siliconflow":
         _apply_enable_thinking_controls(
             extra_body,
             request,
@@ -89,33 +85,33 @@ def apply_openai_reasoning_controls(
             preserve_thinking=False,
             bailian_deepseek_effort=False,
         )
-    elif dialect == "openrouter":
+    elif adapter_id == "openrouter":
         _apply_openrouter_controls(
             extra_body,
             request,
             thinking=thinking,
             model=str(kwargs.get("model") or ""),
         )
-    elif dialect == "together":
+    elif adapter_id == "together":
         _apply_together_controls(extra_body, request, thinking=thinking)
-    elif dialect == "nvidia":
+    elif adapter_id == "nvidia":
         _apply_nvidia_controls(
             extra_body,
             request,
             thinking=thinking,
             model=str(kwargs.get("model") or ""),
         )
-    elif dialect == "minimax":
+    elif adapter_id == "minimax":
         _apply_reasoning_split_controls(
             extra_body,
             request,
             thinking=thinking,
         )
-    elif dialect == "gemini":
+    elif adapter_id == "gemini":
         _apply_gemini_controls(extra_body, request, thinking=thinking)
-    elif dialect == "ollama":
+    elif adapter_id == "ollama":
         _apply_ollama_controls(extra_body, thinking=thinking)
-    elif dialect in ("deepseek", "thinking-type"):
+    elif adapter_id in ("deepseek", "thinking-type"):
         _apply_thinking_type_controls(
             kwargs,
             extra_body,

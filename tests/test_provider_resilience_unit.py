@@ -213,7 +213,7 @@ def test_llm_probe_uses_compatible_output_limit(monkeypatch: pytest.MonkeyPatch)
     assert captured == {"max_tokens": 64, "retry": False}
 
 
-def test_openai_adapter_obeys_explicit_model_capabilities(
+def test_openai_adapter_uses_resolved_model_metadata_and_capabilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -240,10 +240,9 @@ def test_openai_adapter_obeys_explicit_model_capabilities(
         _env_file=None,
         llm_default_provider="openai-compatible",
         llm_default_api_key="test-key",
+        llm_default_base_url="https://openrouter.ai/api/v1",
         llm_default_model="test-model",
-        llm_chat_dialect="openrouter",
         llm_chat_supports_temperature=False,
-        llm_chat_token_limit_param="max_tokens",
     )
     client = OpenAIChatClient(resolve_profile(settings, "chat"))
 
@@ -255,7 +254,7 @@ def test_openai_adapter_obeys_explicit_model_capabilities(
     )))
 
     assert response.text == "ok"
-    assert client._compat_dialect == "openrouter"
+    assert client.adapter_id == "openrouter"
     assert captured["max_tokens"] == 17
     assert "max_completion_tokens" not in captured
     assert "temperature" not in captured

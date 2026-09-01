@@ -66,31 +66,23 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "llm_default_base_url",
     "llm_default_model",
     "llm_default_tps",
-    "llm_default_dialect",
     "llm_default_context_window",
-    "llm_default_tokenizer",
     "llm_default_supports_vision",
     "llm_default_supports_tools",
     "llm_default_supports_temperature",
-    "llm_default_token_limit_param",
     # Per-profile overrides
     "llm_chat_provider", "llm_chat_api_key", "llm_chat_base_url", "llm_chat_model",
-    "llm_chat_tps", "llm_chat_dialect", "llm_chat_context_window",
-    "llm_chat_tokenizer", "llm_chat_supports_vision", "llm_chat_supports_tools",
-    "llm_chat_supports_temperature", "llm_chat_token_limit_param",
+    "llm_chat_tps", "llm_chat_context_window", "llm_chat_supports_vision",
+    "llm_chat_supports_tools", "llm_chat_supports_temperature",
     "llm_reflect_provider", "llm_reflect_api_key", "llm_reflect_base_url", "llm_reflect_model",
-    "llm_reflect_tps", "llm_reflect_dialect", "llm_reflect_context_window",
-    "llm_reflect_tokenizer", "llm_reflect_supports_vision",
+    "llm_reflect_tps", "llm_reflect_context_window", "llm_reflect_supports_vision",
     "llm_reflect_supports_tools", "llm_reflect_supports_temperature",
-    "llm_reflect_token_limit_param",
     "llm_ingest_provider", "llm_ingest_api_key", "llm_ingest_base_url", "llm_ingest_model",
-    "llm_ingest_tps", "llm_ingest_dialect", "llm_ingest_context_window",
-    "llm_ingest_tokenizer", "llm_ingest_supports_vision", "llm_ingest_supports_tools",
-    "llm_ingest_supports_temperature", "llm_ingest_token_limit_param",
+    "llm_ingest_tps", "llm_ingest_context_window", "llm_ingest_supports_vision",
+    "llm_ingest_supports_tools", "llm_ingest_supports_temperature",
     "llm_vision_provider", "llm_vision_api_key", "llm_vision_base_url", "llm_vision_model",
-    "llm_vision_tps", "llm_vision_dialect", "llm_vision_context_window",
-    "llm_vision_tokenizer", "llm_vision_supports_vision", "llm_vision_supports_tools",
-    "llm_vision_supports_temperature", "llm_vision_token_limit_param",
+    "llm_vision_tps", "llm_vision_context_window", "llm_vision_supports_vision",
+    "llm_vision_supports_tools", "llm_vision_supports_temperature",
     # llm_audio_* fields are intentionally NOT in the allowlist: no
     # pipeline consumes the audio profile yet, so accepting writes
     # would just persist dead config that misleads the user when
@@ -132,9 +124,6 @@ _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "an
 _VALID_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"dashscope", "openai-compatible"})
 _VALID_SEMANTIC_INDEX_BACKENDS: frozenset[str] = frozenset({"auto", "file", "sqlite-vec"})
 _VALID_EVIDENCE_SELECTION: frozenset[str] = frozenset({"quota", "rerank"})
-_VALID_TOKEN_LIMIT_PARAMS: frozenset[str] = frozenset({
-    "max_tokens", "max_completion_tokens",
-})
 _VALID_CONFLICT: frozenset[str] = frozenset({"rename", "error", "skip"})
 
 
@@ -253,12 +242,6 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
         if k == "evidence_selection":
             if v not in _VALID_EVIDENCE_SELECTION:
                 bad.append(f"{k}: must be one of {sorted(_VALID_EVIDENCE_SELECTION)}")
-                continue
-        if k.endswith("_token_limit_param"):
-            if v not in _VALID_TOKEN_LIMIT_PARAMS:
-                bad.append(
-                    f"{k}: must be one of {sorted(_VALID_TOKEN_LIMIT_PARAMS)}"
-                )
                 continue
         if k in (
             "agent_plan_max_tokens",

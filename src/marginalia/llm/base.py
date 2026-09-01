@@ -15,6 +15,8 @@ class ChatClient(Protocol):
     profile_name: str
     provider: str
     model: str
+    adapter_id: str
+    token_counter_id: str
 
     async def complete(self, request: ChatRequest) -> ChatResponse: ...
 

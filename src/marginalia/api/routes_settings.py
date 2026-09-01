@@ -210,13 +210,10 @@ def llm_settings() -> dict[str, Any]:
     for p in LLM_PROFILES_VISIBLE:
         resolved = resolve_profile(s, p)
         capabilities = {
-            "dialect": resolved.capabilities.dialect,
             "context_window": resolved.capabilities.context_window,
-            "tokenizer": resolved.capabilities.tokenizer,
             "supports_vision": resolved.capabilities.supports_vision,
             "supports_tools": resolved.capabilities.supports_tools,
             "supports_temperature": resolved.capabilities.supports_temperature,
-            "token_limit_param": resolved.capabilities.token_limit_param,
         }
         if p == "vision":
             # Opt-in profile: don't show the inherited default (the
@@ -226,6 +223,7 @@ def llm_settings() -> dict[str, Any]:
             api_key = getattr(s, f"llm_{p}_api_key")
             profiles[p] = {
                 "provider": getattr(s, f"llm_{p}_provider"),
+                "adapter": resolved.adapter_id,
                 "api_key": _mask(api_key),
                 "api_key_set": bool(api_key),
                 "base_url": getattr(s, f"llm_{p}_base_url"),
@@ -237,6 +235,7 @@ def llm_settings() -> dict[str, Any]:
         prof = resolved
         profiles[p] = {
             "provider": prof.provider,
+            "adapter": prof.adapter_id,
             "api_key": _mask(prof.api_key),
             "api_key_set": bool(prof.api_key),
             "base_url": prof.base_url,
@@ -253,28 +252,29 @@ def llm_settings() -> dict[str, Any]:
         else:
             masked_overlay[k] = v
 
+    from marginalia.llm.model_registry import resolve_model_metadata
+
+    default_metadata = resolve_model_metadata(
+        provider=s.llm_default_provider,
+        base_url=s.llm_default_base_url,
+        model=s.llm_default_model,
+    )
     return {
         "profiles": profiles,
         "overlay": masked_overlay,
         "defaults": {
             "provider": s.llm_default_provider,
+            "adapter": default_metadata.adapter_id,
             "model": s.llm_default_model,
             "base_url": s.llm_default_base_url,
             "api_key": _mask(s.llm_default_api_key),
             "api_key_set": bool(s.llm_default_api_key),
             "tps": s.llm_default_tps,
             "capabilities": {
-                "dialect": s.llm_default_dialect or (
-                    "anthropic" if s.llm_default_provider == "anthropic" else
-                    "openai" if s.llm_default_provider == "openai" else
-                    "openai-compatible"
-                ),
                 "context_window": s.llm_default_context_window,
-                "tokenizer": s.llm_default_tokenizer,
                 "supports_vision": s.llm_default_supports_vision,
                 "supports_tools": s.llm_default_supports_tools,
                 "supports_temperature": s.llm_default_supports_temperature,
-                "token_limit_param": s.llm_default_token_limit_param,
             },
         },
     }

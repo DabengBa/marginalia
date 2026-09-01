@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from marginalia.config import LlmProfile, ModelCapabilities
+from marginalia.config import LlmProfile
 from marginalia.llm.anthropic_adapter import AnthropicChatClient
 from marginalia.llm.factory import _UsageRecordingChatClient
 from marginalia.llm.model_controls import should_disable_thinking_by_default
@@ -17,7 +17,7 @@ async def _capture_openai_kwargs(
     base_url: str,
     model: str,
     request: ChatRequest,
-    dialect: str = "openai-compatible",
+    provider: str = "openai-compatible",
 ) -> dict:
     seen: dict = {}
 
@@ -33,11 +33,10 @@ async def _capture_openai_kwargs(
 
     client = OpenAIChatClient(LlmProfile(
         name="ingest",
-        provider="openai-compatible",
+        provider=provider,  # type: ignore[arg-type]
         api_key="sk-fake",
         base_url=base_url,
         model=model,
-        capabilities=ModelCapabilities(dialect=dialect),
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
@@ -54,18 +53,16 @@ def test_ollama_ingest_profile_does_not_disable_thinking_by_default() -> None:
         api_key="local",
         base_url="http://127.0.0.1:11434/v1",
         model="qwen2.5:7b",
-        capabilities=ModelCapabilities(dialect="ollama"),
     )
 
     assert should_disable_thinking_by_default(profile) is False
 
 
 @pytest.mark.asyncio
-async def test_ollama_dialect_uses_max_tokens() -> None:
+async def test_ollama_adapter_uses_max_tokens() -> None:
     seen = await _capture_openai_kwargs(
         base_url="http://127.0.0.1:11434/v1",
         model="qwen2.5:7b",
-        dialect="ollama",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -94,11 +91,10 @@ async def test_openai_shape_can_omit_provider_output_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ollama_dialect_drops_thinking_controls() -> None:
+async def test_ollama_adapter_drops_thinking_controls() -> None:
     seen = await _capture_openai_kwargs(
         base_url="http://localhost:11434/v1",
         model="qwen2.5:7b",
-        dialect="ollama",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -241,7 +237,7 @@ async def test_openai_adapter_parses_dsml_text_tool_calls() -> None:
             usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
         )
 
-    # DSML text-markup parsing is gated to the dialects that actually emit it
+    # DSML text-markup parsing is gated to the adapters that actually emit it
     # (deepseek / thinking-type); a deepseek base_url selects that path.
     client = OpenAIChatClient(LlmProfile(
         name="chat",
@@ -249,7 +245,6 @@ async def test_openai_adapter_parses_dsml_text_tool_calls() -> None:
         api_key="sk-fake",
         base_url="https://api.deepseek.com/v1",
         model="fake-model",
-        capabilities=ModelCapabilities(dialect="deepseek"),
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
@@ -296,8 +291,6 @@ def _dsml_markup() -> str:
 def _dsml_client(
     base_url: str,
     content: str,
-    *,
-    dialect: str = "openai-compatible",
 ) -> OpenAIChatClient:
     async def fake_create(**kwargs):
         return SimpleNamespace(
@@ -314,7 +307,6 @@ def _dsml_client(
         api_key="sk-fake",
         base_url=base_url,
         model="fake-model",
-        capabilities=ModelCapabilities(dialect=dialect),
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
@@ -328,7 +320,7 @@ _DSML_TOOLS = [
 
 
 @pytest.mark.asyncio
-async def test_openai_adapter_ignores_dsml_markup_on_generic_dialect() -> None:
+async def test_openai_adapter_ignores_dsml_markup_on_generic_adapter() -> None:
     """DSML markup on a non-deepseek endpoint is document content, not a tool
     call — executing it would let quoted/ingested text drive real tools."""
     client = _dsml_client("https://example.invalid", _dsml_markup())
@@ -349,7 +341,7 @@ async def test_openai_adapter_ignores_mid_text_dsml_markup() -> None:
     embedded mid-answer is the model quoting content and must stay text."""
     content = "The document contains this markup:\n" + _dsml_markup()
     client = _dsml_client(
-        "https://api.deepseek.com/v1", content, dialect="deepseek",
+        "https://api.deepseek.com/v1", content,
     )
     resp = await client.complete(ChatRequest(
         system=None,
@@ -382,7 +374,6 @@ async def test_bailian_qwen_maps_thinking_to_enable_thinking() -> None:
         api_key="sk-fake",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/",
         model="qwen-plus",
-        capabilities=ModelCapabilities(dialect="bailian"),
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
@@ -423,7 +414,6 @@ async def test_bailian_disable_thinking_uses_enable_thinking_false() -> None:
         api_key="sk-fake",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/",
         model="deepseek-v4-pro",
-        capabilities=ModelCapabilities(dialect="bailian"),
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
@@ -449,7 +439,6 @@ async def test_siliconflow_disable_thinking_uses_enable_thinking_false() -> None
     seen = await _capture_openai_kwargs(
         base_url="https://api.siliconflow.cn/v1",
         model="Qwen/Qwen3-32B",
-        dialect="siliconflow",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -503,7 +492,6 @@ async def test_openrouter_kimi_maps_thinking_and_gateway_reasoning() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://openrouter.ai/api/v1",
         model="moonshotai/kimi-k2.5",
-        dialect="openrouter",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -524,7 +512,6 @@ async def test_openrouter_disable_thinking_uses_gateway_disable() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://openrouter.ai/api/v1",
         model="openai/gpt-4o",
-        dialect="openrouter",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -543,7 +530,6 @@ async def test_nvidia_qwen_uses_chat_template_kwargs() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://integrate.api.nvidia.com/v1",
         model="qwen/qwen3-32b",
-        dialect="nvidia",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -565,7 +551,6 @@ async def test_minimax_uses_reasoning_split() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.minimax.io/v1",
         model="MiniMax-M2.7",
-        dialect="minimax",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -582,7 +567,6 @@ async def test_deepseek_v4_uses_thinking_type_controls() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.deepseek.com",
         model="deepseek-v4-pro",
-        dialect="deepseek",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -600,7 +584,6 @@ async def test_deepseek_none_disables_thinking_without_reasoning_effort() -> Non
     seen = await _capture_openai_kwargs(
         base_url="https://api.deepseek.com",
         model="deepseek-v4-pro",
-        dialect="deepseek",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -618,7 +601,6 @@ async def test_deepseek_explicit_disable_wins_over_reasoning_effort() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.deepseek.com",
         model="deepseek-v4-pro",
-        dialect="deepseek",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -637,7 +619,6 @@ async def test_moonshot_kimi_uses_thinking_without_reasoning_effort() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.moonshot.cn/v1",
         model="kimi-k2.6",
-        dialect="thinking-type",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -655,7 +636,6 @@ async def test_xiaomi_mimo_uses_thinking_type_controls() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.xiaomimimo.com/v1",
         model="mimo-v2.5-pro",
-        dialect="thinking-type",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -673,7 +653,6 @@ async def test_volcengine_uses_thinking_type_controls() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://ark.cn-beijing.volces.com/api/v3",
         model="doubao-seed-2-0-pro",
-        dialect="thinking-type",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -691,7 +670,6 @@ async def test_byteplus_minimal_disables_thinking_type_controls() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
         model="doubao-seed-2-0-pro",
-        dialect="thinking-type",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -709,7 +687,6 @@ async def test_gemini_disable_thinking_uses_google_thinking_config() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         model="gemini-2.5-flash",
-        dialect="gemini",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -728,7 +705,7 @@ async def test_openai_reasoning_models_omit_temperature() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://api.openai.com/v1",
         model="gpt-5",
-        dialect="openai",
+        provider="openai",
         request=ChatRequest(
             system=None,
             messages=[ChatMessage(role="user", content="hello")],
@@ -739,6 +716,8 @@ async def test_openai_reasoning_models_omit_temperature() -> None:
 
     assert "temperature" not in seen
     assert seen["reasoning_effort"] == "medium"
+    assert seen["max_completion_tokens"] == 32
+    assert "max_tokens" not in seen
 
 
 @pytest.mark.asyncio

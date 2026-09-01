@@ -13,28 +13,27 @@ from marginalia.llm.types import ChatMessage, ToolResultBlock, ToolUseBlock
 from marginalia.llm import PromptPrefixTracker
 
 
-def test_model_capabilities_inherit_and_override_without_url_detection() -> None:
+def test_model_runtime_metadata_and_capabilities_resolve_independently() -> None:
     settings = Settings(
         _env_file=None,
         llm_default_provider="openai-compatible",
-        llm_default_base_url="https://dashscope.example/v1",
-        llm_default_dialect="openrouter",
+        llm_default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        llm_default_model="qwen-plus",
         llm_default_context_window=32_000,
-        llm_default_tokenizer="cl100k_base",
         llm_default_supports_tools=False,
-        llm_default_token_limit_param="max_completion_tokens",
-        llm_chat_dialect="bailian",
         llm_chat_context_window=64_000,
         llm_chat_supports_tools=True,
     )
 
     profile = resolve_profile(settings, "chat")
 
-    assert profile.capabilities.dialect == "bailian"
+    assert profile.adapter_id == "bailian"
+    assert profile.token_counter_id == "utf8_upper_bound"
     assert profile.capabilities.context_window == 64_000
-    assert profile.capabilities.tokenizer == "cl100k_base"
     assert profile.capabilities.supports_tools is True
-    assert profile.capabilities.token_limit_param == "max_completion_tokens"
+    assert not hasattr(profile.capabilities, "dialect")
+    assert not hasattr(profile.capabilities, "tokenizer")
+    assert not hasattr(profile.capabilities, "token_limit_param")
 
 
 def test_compaction_preserves_atomic_tool_exchange_and_critical_context() -> None:
@@ -102,10 +101,10 @@ def test_request_fit_preserves_stable_prefix_and_reports_compaction() -> None:
         ChatMessage(role="assistant", content="prior answer " * 300),
         ChatMessage(role="user", content="latest question"),
     ]
-    chat = SimpleNamespace(capabilities=ModelCapabilities(
-        context_window=1_500,
-        tokenizer="utf8_upper_bound",
-    ))
+    chat = SimpleNamespace(
+        capabilities=ModelCapabilities(context_window=1_500),
+        token_counter_id="utf8_upper_bound",
+    )
 
     fitted, metrics = _fit_provider_messages(
         chat=chat,
@@ -122,10 +121,10 @@ def test_request_fit_preserves_stable_prefix_and_reports_compaction() -> None:
 
 
 def test_repeated_request_compaction_uses_explicit_cache_epoch() -> None:
-    chat = SimpleNamespace(capabilities=ModelCapabilities(
-        context_window=1_500,
-        tokenizer="utf8_upper_bound",
-    ))
+    chat = SimpleNamespace(
+        capabilities=ModelCapabilities(context_window=1_500),
+        token_counter_id="utf8_upper_bound",
+    )
     messages = [
         ChatMessage(role="user", content="stable snapshot"),
         ChatMessage(role="user", content="old context " * 300),
