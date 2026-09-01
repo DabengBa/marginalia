@@ -12,11 +12,11 @@
  *  is set. Typing replaces it; leaving it blank keeps whatever's
  *  already configured. */
 import { useEffect, useMemo, useState } from "react";
-import { Save, RotateCcw, CheckCircle2, XCircle } from "lucide-react";
-import { Button, Input, InputNumber, Select } from "antd";
+import { Save, RotateCcw, Loader2, CheckCircle2, XCircle } from "lucide-react";
 
 import { settings as settingsApi } from "@/api/client";
 import type { LlmTestResult } from "@/api/client";
+import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
@@ -59,25 +59,18 @@ export function LlmProfileEditor({ data, onChange }: Props) {
 
   return (
     <div className="space-y-2">
-      {PROFILES.map((name) => (
-        <ProfileRow
-          key={name}
-          name={name}
-          data={data}
-          isOpen={open === name}
-          onToggle={() => setOpen(open === name ? null : name)}
-          onChange={onChange}
-        />
-      ))}
-
       <div className="flex items-center justify-end">
-        <Button
-          size="small"
+        <button
           onClick={runTest}
-          loading={testing}
+          disabled={testing}
+          className={cn(
+            "flex items-center gap-1.5 rounded border border-border px-2.5 py-1 text-xs font-medium",
+            "hover:bg-bg-subtle disabled:opacity-40",
+          )}
         >
+          {testing && <Loader2 size={12} className="animate-spin" />}
           {testing ? t.llm.testing : t.llm.testConnection}
-        </Button>
+        </button>
       </div>
 
       {testErr && (
@@ -94,6 +87,17 @@ export function LlmProfileEditor({ data, onChange }: Props) {
           ))}
         </div>
       )}
+
+      {PROFILES.map((name) => (
+        <ProfileRow
+          key={name}
+          name={name}
+          data={data}
+          isOpen={open === name}
+          onToggle={() => setOpen(open === name ? null : name)}
+          onChange={onChange}
+        />
+      ))}
     </div>
   );
 }
@@ -251,48 +255,43 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
 
   return (
     <div className="rounded-md border border-border bg-bg-base">
-      <Button
-        type="text"
-        block
+      <button
         onClick={onToggle}
-        className="h-auto px-3 py-2 text-left"
-        style={{ justifyContent: "space-between" }}
+        className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-bg-subtle"
       >
-        <span className="flex w-full items-center justify-between">
-          <span className="flex items-center gap-3">
-            <span className="font-medium capitalize">{name}</span>
-            <span className="font-mono text-xs text-fg-subtle">
-              {view.provider || view.model
-                ? `${view.provider ?? t.common.unset}/${view.model || t.common.unset}`
-                : t.common.unset}
-            </span>
+        <div className="flex items-center gap-3">
+          <span className="font-medium capitalize">{name}</span>
+          <span className="font-mono text-xs text-fg-subtle">
+            {view.provider || view.model
+              ? `${view.provider ?? t.common.unset}/${view.model || t.common.unset}`
+              : t.common.unset}
           </span>
-          <span className="text-xs text-fg-subtle">
-            {overrideCount > 0
-              ? t.llm.override(overrideCount)
-              : optional
-                ? view.model || view.api_key_set
+        </div>
+        <span className="text-xs text-fg-subtle">
+          {overrideCount > 0
+            ? t.llm.override(overrideCount)
+            : optional
+              ? view.model || view.api_key_set
+                ? t.llm.fromEnv
+                : t.common.notConfigured
+              : isDefault
+                ? view.api_key_set
                   ? t.llm.fromEnv
                   : t.common.notConfigured
-                : isDefault
-                  ? view.api_key_set
-                    ? t.llm.fromEnv
-                    : t.common.notConfigured
-                  : t.llm.inherited}
-          </span>
+                : t.llm.inherited}
         </span>
-      </Button>
+      </button>
 
       {isOpen && (
         <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
           <Field label={t.llm.provider}>
-            <Select
-              size="small"
-              className="w-full"
-              value={form.provider || undefined}
-              allowClear
-              placeholder={
-                isDefault
+            <select
+              value={form.provider ?? ""}
+              onChange={(e) => setForm({ ...form, provider: e.target.value })}
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            >
+              <option value="">
+                {isDefault
                   ? view.provider
                     ? t.common.fromEnv(view.provider)
                     : t.common.unset
@@ -300,19 +299,15 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                     ? view.provider
                       ? t.common.fromEnv(view.provider)
                       : t.common.unset
-                    : t.common.inherit(data.defaults.provider)
-              }
-              onChange={(v) => setForm({ ...form, provider: v ?? "" })}
-              options={[
-                { value: "openai", label: "openai" },
-                { value: "openai-compatible", label: "openai-compatible" },
-                { value: "anthropic", label: "anthropic" },
-              ]}
-            />
+                    : t.common.inherit(data.defaults.provider)}
+              </option>
+              <option value="openai">openai</option>
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="anthropic">anthropic</option>
+            </select>
           </Field>
           <Field label={t.llm.model}>
-            <Input
-              size="small"
+            <input
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               placeholder={
@@ -326,12 +321,11 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : t.common.inherit(data.defaults.model)
               }
-              className="w-full font-mono"
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
           <Field label={t.llm.baseUrl}>
-            <Input
-              size="small"
+            <input
               value={form.base_url ?? ""}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               placeholder={
@@ -345,35 +339,17 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
                       : t.common.unset
                     : data.defaults.base_url || t.common.providerDefault
               }
-              className="w-full font-mono"
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
-
-          <Field label={t.llm.apiKey}>
-            <Input.Password
-              size="small"
-              value={form.api_key ?? ""}
-              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder={
-                view.api_key_set
-                  ? t.common.setValue(view.api_key ?? "")
-                  : t.common.unset
-              }
-              className="w-full font-mono"
-            />
-            <p className="mt-1 text-xs text-fg-subtle">
-              {t.llm.keepKeyHint}
-            </p>
-          </Field>
-
           <Field label={t.llm.contextWindow}>
-            <InputNumber
-              size="small"
+            <input
+              type="number"
               min={1024}
-              value={form.context_window ? Number(form.context_window) : undefined}
-              onChange={(v) => setForm({ ...form, context_window: v != null ? String(v) : "" })}
+              value={form.context_window ?? ""}
+              onChange={(e) => setForm({ ...form, context_window: e.target.value })}
               placeholder={String(view.capabilities.context_window)}
-              className="w-full font-mono"
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
           <CapabilitySelect
@@ -394,6 +370,23 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
             inherited={view.capabilities.supports_temperature}
             onChange={(value) => setForm({ ...form, supports_temperature: value })}
           />
+          <Field label={t.llm.apiKey}>
+            <input
+              type="password"
+              value={form.api_key ?? ""}
+              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+              placeholder={
+                view.api_key_set
+                  ? t.common.setValue(view.api_key ?? "")
+                  : t.common.unset
+              }
+              className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
+            />
+            <p className="mt-1 text-xs text-fg-subtle">
+              {t.llm.keepKeyHint}
+            </p>
+          </Field>
+
           {err && (
             <p className="rounded bg-danger/10 px-2 py-1 text-xs text-danger">
               {err}
@@ -401,26 +394,24 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           )}
 
           <div className="flex items-center justify-between pt-1">
-            <Button
-              type="text"
-              size="small"
+            <button
               onClick={reset}
               disabled={saving || overrideCount === 0}
-              icon={<RotateCcw size={11} />}
-              className="px-1 text-xs text-fg-subtle"
+              className="flex items-center gap-1 text-xs text-fg-subtle hover:text-fg-base disabled:opacity-40"
             >
-              {t.llm.reset}
-            </Button>
-            <Button
-              type="primary"
-              size="small"
+              <RotateCcw size={11} /> {t.llm.reset}
+            </button>
+            <button
               onClick={save}
               disabled={!dirty || saving}
-              loading={saving}
-              icon={<Save size={11} />}
+              className={cn(
+                "flex items-center gap-1.5 rounded bg-accent px-3 py-1 text-xs font-medium text-accent-fg",
+                "hover:opacity-90 disabled:opacity-40",
+              )}
             >
+              {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
               {t.common.save}
-            </Button>
+            </button>
           </div>
           {savedAt && !saving && (
             <p className="text-right text-xs text-fg-subtle">
@@ -440,13 +431,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label
-      className={[
-        "block",
-        "[&>.ant-input]:!w-full [&>.ant-input-affix-wrapper]:!w-full",
-        "[&>.ant-input-number]:!w-full [&>.ant-select]:!w-full",
-      ].join(" ")}
-    >
+    <label className="block">
       <span className="mb-1 block text-xs font-medium text-fg-muted">{label}</span>
       {children}
     </label>
@@ -466,18 +451,15 @@ function CapabilitySelect({
 }) {
   return (
     <Field label={label}>
-      <Select
-        size="small"
-        className="w-full"
-        value={value || undefined}
-        allowClear
-        placeholder={String(inherited)}
-        onChange={(v) => onChange(v ?? "")}
-        options={[
-          { value: "true", label: "true" },
-          { value: "false", label: "false" },
-        ]}
-      />
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
+      >
+        <option value="">{String(inherited)}</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
     </Field>
   );
 }

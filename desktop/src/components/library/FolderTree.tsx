@@ -14,11 +14,9 @@ import {
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
   AlertTriangle, CircleDashed, CloudDownload, CloudUpload,
 } from "lucide-react";
-import { App as AntdApp, Button, Tooltip } from "antd";
 
 import { folders, fileEntries, files, maybeAuthDownload, ApiError } from "@/api/client";
 import type { Folder, FolderIngestSummary, FileEntrySummary, WebDavStatus } from "@/types/api";
-import { confirmAction } from "@/lib/antdFeedback";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
 
@@ -72,7 +70,6 @@ export function FolderTree(props: Props) {
   const [reprocessingAll, setReprocessingAll] = useState(false);
   const [reprocessingFailed, setReprocessingFailed] = useState(false);
   const { t } = useI18n();
-  const { message, modal } = AntdApp.useApp();
 
   const load = useCallback(() => {
     folders.list(null).then(
@@ -124,20 +121,16 @@ export function FolderTree(props: Props) {
 
   const onReprocessScope = async () => {
     if (reprocessingAll) return;
-    const confirmed = await confirmAction(modal.confirm, reprocessLabel, {
-      okText: t.common.yes,
-      cancelText: t.common.cancel,
-    });
-    if (!confirmed) return;
+    if (!confirm(reprocessLabel)) return;
     setReprocessingAll(true);
     try {
       const r = await files.reprocessBulk(reprocessScope);
-      void message.success(
+      alert(
         t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
       );
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
-      void message.error(t.library.bulkReprocessFailed(msg));
+      alert(t.library.bulkReprocessFailed(msg));
     } finally {
       setReprocessingAll(false);
     }
@@ -145,21 +138,17 @@ export function FolderTree(props: Props) {
 
   const onReprocessFailedScope = async () => {
     if (reprocessingFailed) return;
-    const confirmed = await confirmAction(modal.confirm, failedLabel, {
-      okText: t.common.yes,
-      cancelText: t.common.cancel,
-    });
-    if (!confirmed) return;
+    if (!confirm(failedLabel)) return;
     setReprocessingFailed(true);
     try {
       const r = await files.reprocessBulk(failedScope);
-      void message.success(
+      alert(
         t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
       );
       load();
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
-      void message.error(t.library.bulkReprocessFailed(msg));
+      alert(t.library.bulkReprocessFailed(msg));
     } finally {
       setReprocessingFailed(false);
     }
@@ -171,52 +160,65 @@ export function FolderTree(props: Props) {
         <span className="text-xs font-medium text-fg-muted">{t.library.title}</span>
         <div className="flex items-center gap-1">
           {scopeFailedCount > 0 && (
-            <TreeIconButton
+            <button
               onClick={onReprocessFailedScope}
               disabled={reprocessingFailed}
-              loading={reprocessingFailed}
-              danger
               title={props.selectedFolderId
                 ? t.library.reprocessFailedFolderTitle(headerTarget, scopeFailedCount)
                 : t.library.reprocessFailedAllTitle(scopeFailedCount)}
-              icon={<AlertTriangle size={13} />}
-            />
+              className="rounded p-1 text-danger hover:bg-bg-muted hover:text-danger disabled:opacity-50"
+            >
+              {reprocessingFailed
+                ? <Loader2 size={13} className="animate-spin" />
+                : <AlertTriangle size={13} />}
+            </button>
           )}
-          <TreeIconButton
+          <button
             onClick={onReprocessScope}
             disabled={reprocessingAll}
-            loading={reprocessingAll}
             title={props.selectedFolderId
               ? t.library.reprocessFolderTitle(headerTarget)
               : t.library.reprocessAllTitle}
-            icon={<RefreshCw size={13} />}
-          />
-          <TreeIconButton
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            {reprocessingAll
+              ? <Loader2 size={13} className="animate-spin" />
+              : <RefreshCw size={13} />}
+          </button>
+          <button
             onClick={() => props.onWebDavDownloadSync?.()}
             disabled={!props.webdav?.configured}
             title={props.webdav?.configured
               ? webdavDownloadTitle(props.webdav, t)
               : t.library.webdavNotConfigured}
-            icon={<CloudDownload size={13} />}
-          />
-          <TreeIconButton
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            <CloudDownload size={13} />
+          </button>
+          <button
             onClick={() => props.onWebDavUploadSync?.()}
             disabled={!props.webdav?.configured}
             title={props.webdav?.configured
               ? webdavUploadTitle(props.webdav, t)
               : t.library.webdavNotConfigured}
-            icon={<CloudUpload size={13} />}
-          />
-          <TreeIconButton
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            <CloudUpload size={13} />
+          </button>
+          <button
             onClick={() => props.onNewFolderHere(null)}
             title={t.library.newFolderIn(headerTarget)}
-            icon={<Plus size={13} />}
-          />
-          <TreeIconButton
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base"
+          >
+            <Plus size={13} />
+          </button>
+          <button
             onClick={() => props.onUploadHere(null)}
             title={t.library.uploadTo(headerTarget)}
-            icon={<UploadIcon size={13} />}
-          />
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base"
+          >
+            <UploadIcon size={13} />
+          </button>
         </div>
       </div>
       <div
@@ -274,45 +276,6 @@ function webdavDownloadTitle(status: WebDavStatus, t: I18nStrings): string {
   return t.library.webdavPullNow;
 }
 
-function TreeIconButton({
-  title,
-  icon,
-  danger,
-  disabled,
-  loading,
-  onClick,
-  className,
-  compact = false,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  danger?: boolean;
-  disabled?: boolean;
-  loading?: boolean;
-  onClick: (event: React.MouseEvent<HTMLElement>) => void;
-  className?: string;
-  compact?: boolean;
-}) {
-  const dimension = compact ? 20 : 24;
-  return (
-    <Tooltip title={title}>
-      <Button
-        type="text"
-        size="small"
-        danger={danger}
-        disabled={disabled}
-        loading={loading}
-        onClick={onClick}
-        title={title}
-        aria-label={title}
-        icon={loading ? undefined : icon}
-        className={cn("shrink-0 text-fg-muted", className)}
-        style={{ width: dimension, height: dimension, minWidth: dimension, padding: 0 }}
-      />
-    </Tooltip>
-  );
-}
-
 function FolderRow({
   folder, depth,
   selectedEntryId, selectedFolderId, selectedFolderName, selectedFolderFailedCount,
@@ -334,7 +297,6 @@ function FolderRow({
   const [deleting, setDeleting] = useState(false);
   const loadedRef = useRef(false);
   const { t } = useI18n();
-  const { message, modal } = AntdApp.useApp();
 
   const loadDetail = useCallback((showSpinner = !loadedRef.current) => {
     if (showSpinner) setLoading(true);
@@ -391,23 +353,14 @@ function FolderRow({
   const onDeleteFolder = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (deleting) return;
-    const confirmed = await confirmAction(
-      modal.confirm,
-      t.library.deleteFolderConfirm(folder.name),
-      {
-        okText: t.common.delete,
-        cancelText: t.common.cancel,
-        okButtonProps: { danger: true },
-      },
-    );
-    if (!confirmed) return;
+    if (!confirm(t.library.deleteFolderConfirm(folder.name))) return;
     setDeleting(true);
     try {
       await folders.delete(folder.id);
       onFolderDeleted(folder.id);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      void message.error(t.library.deleteFailed(msg));
+      alert(t.library.deleteFailed(msg));
       setDeleting(false);
     }
   };
@@ -415,22 +368,17 @@ function FolderRow({
   const onReprocessFolder = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (reprocessingFolder) return;
-    const confirmed = await confirmAction(
-      modal.confirm,
-      t.library.reprocessFolderConfirm(folder.name),
-      { okText: t.common.yes, cancelText: t.common.cancel },
-    );
-    if (!confirmed) return;
+    if (!confirm(t.library.reprocessFolderConfirm(folder.name))) return;
     setReprocessingFolder(true);
     try {
       const r = await files.reprocessBulk({ folder_id: folder.id });
-      void message.success(
+      alert(
         t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
       );
       refreshAfterSubtreeReprocess();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      void message.error(t.library.bulkReprocessFailed(msg));
+      alert(t.library.bulkReprocessFailed(msg));
     } finally {
       setReprocessingFolder(false);
     }
@@ -440,22 +388,17 @@ function FolderRow({
     e.stopPropagation();
     if (reprocessingFailedFolder) return;
     const failedCount = folder.ingest_summary?.failed ?? 0;
-    const confirmed = await confirmAction(
-      modal.confirm,
-      t.library.reprocessFailedFolderConfirm(folder.name, failedCount),
-      { okText: t.common.yes, cancelText: t.common.cancel },
-    );
-    if (!confirmed) return;
+    if (!confirm(t.library.reprocessFailedFolderConfirm(folder.name, failedCount))) return;
     setReprocessingFailedFolder(true);
     try {
       const r = await files.reprocessBulk({ folder_id: folder.id, status: "failed" });
-      void message.success(
+      alert(
         t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
       );
       refreshAfterSubtreeReprocess();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      void message.error(t.library.bulkReprocessFailed(msg));
+      alert(t.library.bulkReprocessFailed(msg));
     } finally {
       setReprocessingFailedFolder(false);
     }
@@ -470,29 +413,22 @@ function FolderRow({
         )}
         style={indent}
       >
-        <Button
-          type="text"
-          size="small"
+        <button
           onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
-          icon={open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           className="shrink-0 text-fg-muted"
-          style={{ width: 18, height: 20, minWidth: 18, padding: 0 }}
-        />
-        <Button
-          type="text"
-          size="small"
-          block
-          onClick={() => onSelectFolder(folder)}
-          className="h-6 min-w-0 flex-1 justify-start px-0 text-left"
         >
-          <span className="flex min-w-0 flex-1 items-center gap-1.5">
-            {open
-              ? <FolderOpen size={13} className="shrink-0 text-fg-muted" />
-              : <FolderIcon size={13} className="shrink-0 text-fg-muted" />}
-            <span className="min-w-0 flex-1 truncate">{folder.name}</span>
-            <FolderIngestBadge summary={folder.ingest_summary} t={t} />
-          </span>
-        </Button>
+          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </button>
+        <button
+          onClick={() => onSelectFolder(folder)}
+          className="flex flex-1 items-center gap-1.5 truncate text-left"
+        >
+          {open
+            ? <FolderOpen size={13} className="text-fg-muted" />
+            : <FolderIcon size={13} className="text-fg-muted" />}
+          <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+          <FolderIngestBadge summary={folder.ingest_summary} t={t} />
+        </button>
         <div
           className={cn(
             "items-center gap-0.5",
@@ -502,58 +438,60 @@ function FolderRow({
           )}
         >
           {folderFailed && (
-            <TreeIconButton
+            <button
               onClick={onReprocessFailedFolder}
               disabled={reprocessingFailedFolder}
-              loading={reprocessingFailedFolder}
-              danger
-              compact
               title={t.library.reprocessFailedFolderTitle(
                 folder.name,
                 folder.ingest_summary?.failed ?? 0,
               )}
-              icon={<AlertTriangle size={11} />}
-            />
+              className="rounded p-0.5 text-danger hover:bg-bg-base hover:text-danger disabled:opacity-50"
+            >
+              {reprocessingFailedFolder
+                ? <Loader2 size={11} className="animate-spin" />
+                : <AlertTriangle size={11} />}
+            </button>
           )}
-          <TreeIconButton
+          <button
             onClick={onReprocessFolder}
             disabled={reprocessingFolder}
-            loading={reprocessingFolder}
-            compact
             title={t.library.reprocessFolderTitle(folder.name)}
-            icon={<RefreshCw size={11} />}
-            className="text-fg-subtle"
-          />
-          <TreeIconButton
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base disabled:opacity-50"
+          >
+            {reprocessingFolder
+              ? <Loader2 size={11} className="animate-spin" />
+              : <RefreshCw size={11} />}
+          </button>
+          <button
             onClick={(e) => {
               e.stopPropagation();
               onNewFolderHere({ id: folder.id, name: folder.name });
             }}
-            compact
             title={t.library.newSubfolder}
-            icon={<Plus size={11} />}
-            className="text-fg-subtle"
-          />
-          <TreeIconButton
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base"
+          >
+            <Plus size={11} />
+          </button>
+          <button
             onClick={(e) => {
               e.stopPropagation();
               onUploadHere({ id: folder.id, name: folder.name });
             }}
-            compact
             title={t.library.uploadHere}
-            icon={<UploadIcon size={11} />}
-            className="text-fg-subtle"
-          />
-          <TreeIconButton
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base"
+          >
+            <UploadIcon size={11} />
+          </button>
+          <button
             onClick={onDeleteFolder}
             disabled={deleting}
-            loading={deleting}
-            danger
-            compact
             title={t.library.deleteFolder}
-            icon={<Trash2 size={11} />}
-            className="text-fg-subtle"
-          />
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger disabled:opacity-50"
+          >
+            {deleting
+              ? <Loader2 size={11} className="animate-spin" />
+              : <Trash2 size={11} />}
+          </button>
         </div>
       </div>
       {open && (
@@ -659,7 +597,6 @@ function FileRow({
 }) {
   const [reprocessing, setReprocessing] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const { message, modal } = AntdApp.useApp();
   const failed = entry.ingest_status === "failed";
   const failureTitle = failed && entry.ingest_error
     ? t.library.ingestFailedReason(entry.ingest_error)
@@ -674,18 +611,16 @@ function FileRow({
     const prompt = failed
       ? t.library.retryAnalysisConfirm(entry.display_name)
       : t.library.reprocessFileConfirm(entry.display_name);
-    const confirmed = await confirmAction(modal.confirm, prompt, {
-      okText: t.common.yes,
-      cancelText: t.common.cancel,
-    });
-    if (!confirmed) return;
+    if (!confirm(prompt)) {
+      return;
+    }
     setReprocessing(true);
     try {
       await files.reprocess(entry.file_id);
       onReprocessed();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      void message.error(t.library.reprocessFailed(msg));
+      alert(t.library.reprocessFailed(msg));
     } finally {
       setReprocessing(false);
     }
@@ -693,23 +628,16 @@ function FileRow({
   const onDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (deleting) return;
-    const confirmed = await confirmAction(
-      modal.confirm,
-      t.library.deleteFileConfirm(entry.display_name),
-      {
-        okText: t.common.delete,
-        cancelText: t.common.cancel,
-        okButtonProps: { danger: true },
-      },
-    );
-    if (!confirmed) return;
+    if (!confirm(t.library.deleteFileConfirm(entry.display_name))) {
+      return;
+    }
     setDeleting(true);
     try {
       await fileEntries.delete(entry.id);
       onDeleted(entry.id);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      void message.error(t.library.deleteFailed(msg));
+      alert(t.library.deleteFailed(msg));
       setDeleting(false);
     }
   };
@@ -721,48 +649,41 @@ function FileRow({
         selected ? "bg-accent-subtle text-accent" : "hover:bg-bg-muted",
       )}
     >
-      <Button
-        type="text"
-        size="small"
-        block
+      <button
         onClick={onClick}
-        className="h-6 min-w-0 flex-1 justify-start px-0 text-left"
+        className="flex flex-1 items-center gap-1.5 truncate text-left"
       >
-        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          <FileText size={12} className="shrink-0 text-fg-subtle" />
-          <span className="min-w-0 flex-1 truncate">{entry.display_name}</span>
-          {failed && (
-            <span
-              className="shrink-0 text-danger"
-              title={failureTitle}
-              aria-label={failureTitle}
-            >
-              <AlertTriangle size={11} />
-            </span>
-          )}
-        </span>
-      </Button>
+        <FileText size={12} className="shrink-0 text-fg-subtle" />
+        <span className="flex-1 truncate">{entry.display_name}</span>
+        {failed && (
+          <span
+            className="shrink-0 text-danger"
+            title={failureTitle}
+            aria-label={failureTitle}
+          >
+            <AlertTriangle size={11} />
+          </span>
+        )}
+      </button>
       {blockedByIngest && (
         <Loader2 size={11} className="shrink-0 animate-spin text-fg-subtle" />
       )}
-      <TreeIconButton
+      <button
         onClick={onReprocess}
         disabled={reprocessing || blockedByIngest}
-        loading={reprocessing}
-        danger={failed}
-        compact
         title={reprocessTitle}
-        icon={<RefreshCw size={11} />}
         className={cn(
+          "shrink-0 rounded p-0.5 disabled:opacity-50",
           failed
-            ? "inline-flex text-danger"
-            : "hidden text-fg-subtle group-hover:inline-flex",
+            ? "flex text-danger hover:bg-bg-base hover:text-danger"
+            : "hidden text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex",
         )}
-      />
-      <Tooltip title={t.library.download}>
-        <Button
-        type="text"
-        size="small"
+      >
+        {reprocessing
+          ? <Loader2 size={11} className="animate-spin" />
+          : <RefreshCw size={11} />}
+      </button>
+      <a
         href={fileEntries.downloadUrl(entry.id)}
         download={entry.display_name}
         onClick={(e) => {
@@ -770,22 +691,20 @@ function FileRow({
           maybeAuthDownload(e, fileEntries.downloadUrl(entry.id), entry.display_name);
         }}
         title={t.library.download}
-        aria-label={t.library.download}
-        icon={<Download size={11} />}
-        className="hidden shrink-0 text-fg-subtle group-hover:inline-flex"
-        style={{ width: 20, height: 20, minWidth: 20, padding: 0 }}
-        />
-      </Tooltip>
-      <TreeIconButton
+        className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex"
+      >
+        <Download size={11} />
+      </a>
+      <button
         onClick={onDelete}
         disabled={deleting}
-        loading={deleting}
-        danger
-        compact
         title={t.common.delete}
-        icon={<Trash2 size={11} />}
-        className="hidden text-fg-subtle group-hover:inline-flex"
-      />
+        className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger group-hover:flex disabled:opacity-50"
+      >
+        {deleting
+          ? <Loader2 size={11} className="animate-spin" />
+          : <Trash2 size={11} />}
+      </button>
     </div>
   );
 }

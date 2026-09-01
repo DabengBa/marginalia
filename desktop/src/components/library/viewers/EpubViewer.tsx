@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut } from "lucide-react";
-import { Button, Input, Tooltip, type InputRef } from "antd";
 
 import { maybeAuthDownload } from "@/api/client";
 import { useI18n } from "@/lib/i18n";
@@ -117,7 +116,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
 }) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
-  const pageInputRef = useRef<InputRef>(null);
+  const pageInputRef = useRef<HTMLInputElement>(null);
   const bookRef = useRef<EpubBookInstance | null>(null);
   const renditionRef = useRef<EpubRenditionInstance | null>(null);
   const appliedLocatorRef = useRef<string | null>(null);
@@ -138,7 +137,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
   const updateLocation = useCallback((loc: EpubLocation | null | undefined) => {
     const progress = epubProgress(bookRef.current, loc);
     setLocation(progress);
-    if (document.activeElement !== pageInputRef.current?.input) {
+    if (document.activeElement !== pageInputRef.current) {
       setPageInput(progress.currentPage == null ? "" : String(progress.currentPage));
     }
   }, []);
@@ -295,7 +294,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-subtle">
-      <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg-base px-3 text-xs text-fg-muted">
+      <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg px-3 text-xs text-fg-muted">
         <div className="flex items-center gap-1">
           <ViewerToolbarButton
             title={t.viewer.prevPage}
@@ -304,8 +303,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
           >
             <ChevronLeft size={14} />
           </ViewerToolbarButton>
-          <Input
-            size="small"
+          <input
             ref={pageInputRef}
             value={pageInput}
             disabled={!canJump}
@@ -321,8 +319,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
               }
             }}
             inputMode="numeric"
-            className="w-12 text-center text-xs tabular-nums"
-            style={{ height: 28 }}
+            className="h-7 w-12 rounded border border-border bg-bg px-1.5 text-center text-xs text-fg-base tabular-nums outline-none focus:border-accent disabled:opacity-50"
             aria-label={t.viewer.epubPage}
           />
           <span className="min-w-10 text-center tabular-nums">/ {totalPages || "-"}</span>
@@ -353,30 +350,26 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
           </ViewerToolbarButton>
         </div>
         <div className="ml-auto flex items-center gap-1">
-          <Tooltip title={t.viewer.download}>
-            <Button
-              size="small"
-              href={downloadUrl}
-              download={name}
-              onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
-              title={t.viewer.download}
-              aria-label={t.viewer.download}
-              icon={<Download size={14} />}
-              className="shrink-0 text-fg-muted"
-              style={{ width: 28, height: 28, minWidth: 28, padding: 0 }}
-            />
-          </Tooltip>
+          <a
+            href={downloadUrl}
+            download={name}
+            onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
+            title={t.viewer.download}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border text-fg-muted transition-colors hover:bg-bg-muted"
+          >
+            <Download size={14} />
+          </a>
         </div>
       </div>
-      <div className="relative min-h-0 flex-1 bg-bg-base">
+      <div className="relative min-h-0 flex-1 bg-bg">
         <div ref={hostRef} className="h-full w-full" />
         {!ready && !err && !srcErr && (
-          <div className="absolute inset-0 z-20 bg-bg-base/80">
+          <div className="absolute inset-0 z-20 bg-bg/80">
             <ViewerLoading />
           </div>
         )}
         {(err || srcErr) && (
-          <div className="absolute inset-0 z-20 bg-bg-base">
+          <div className="absolute inset-0 z-20 bg-bg">
             <ViewerError msg={(err || srcErr)!} />
           </div>
         )}

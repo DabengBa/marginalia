@@ -32,7 +32,6 @@ import { processLatexBrackets } from "@/lib/markdown";
 import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Button } from "antd";
 
 /** Deep-link position on top of an `entry:<uuid>` citation. Locator fields
  *  are intentionally independent because Office citations combine them, for
@@ -227,15 +226,15 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
     <div className="group relative my-3 overflow-hidden rounded-lg border border-border bg-bg-muted">
       <div className="flex items-center justify-between border-b border-border bg-bg-subtle px-3 py-1 text-[11px] text-fg-subtle">
         <span className="font-mono">{language}</span>
-        <Button
-          type="text"
-          size="small"
+        <button
           onClick={onCopy}
-          icon={copied ? <Check size={11} /> : <Copy size={11} />}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-bg-muted hover:text-fg-base"
           title={t.common.copy}
         >
-          {copied ? t.common.copied : t.common.copy}
-        </Button>
+          {copied
+            ? <><Check size={11} /> {t.common.copied}</>
+            : <><Copy size={11} /> {t.common.copy}</>}
+        </button>
       </div>
       <SyntaxHighlighter
         language={language}

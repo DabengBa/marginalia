@@ -7,7 +7,6 @@
  */
 import { ChevronRight, ChevronLeft, Tag, Sparkles, FileText } from "lucide-react";
 import { Link } from "react-router-dom";
-import { Button } from "antd";
 
 import type { FileMetadata } from "@/types/api";
 import { cn } from "@/lib/utils";
@@ -27,15 +26,13 @@ export function MetaPanel({ meta, loading, open, onToggle }: Props) {
       "flex shrink-0 flex-col border-l border-border bg-bg-subtle transition-[width] duration-150",
       open ? "w-72" : "w-8",
     )}>
-      <Button
-        type="text"
-        block
+      <button
         onClick={onToggle}
         title={open ? t.library.detailsHide : t.library.detailsShow}
-        aria-label={open ? t.library.detailsHide : t.library.detailsShow}
-        icon={open ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-        className="h-9 rounded-none border-x-0 border-t-0 text-fg-muted"
-      />
+        className="flex h-9 items-center justify-center border-b border-border text-fg-muted hover:bg-bg-muted"
+      >
+        {open ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+      </button>
       {open && (
         <div className="flex-1 overflow-y-auto p-3 text-xs">
           {loading && <p className="text-fg-subtle">{t.common.loading}</p>}

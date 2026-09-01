@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { AlertCircle, Loader2 } from "lucide-react";
-import { Button, Tooltip } from "antd";
 
 import { authHeaders, fileEntries, hasApiToken } from "@/api/client";
 import type { FilePreviewText } from "@/types/api";
@@ -646,18 +645,20 @@ export function ViewerToolbarButton({
   children: ReactNode;
 }) {
   return (
-    <Tooltip title={title} trigger={["hover", "focus"]}>
-      <Button
-        size="small"
-        title={title}
-        aria-label={title}
-        disabled={disabled}
-        onClick={onClick}
-        icon={children}
-        className={active ? "border-accent/50 bg-accent/10 text-accent" : "text-fg-muted"}
-        style={{ width: 28, height: 28, minWidth: 28, padding: 0 }}
-      />
-    </Tooltip>
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={
+        "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border text-fg-muted transition-colors " +
+        (active
+          ? "border-accent/50 bg-accent/10 text-accent"
+          : "border-border hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40")
+      }
+    >
+      {children}
+    </button>
   );
 }
 

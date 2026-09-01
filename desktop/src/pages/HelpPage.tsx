@@ -1,6 +1,5 @@
 import { BookOpen, MessageSquare, Search, Settings } from "lucide-react";
 import { Link } from "react-router-dom";
-import { Collapse } from "antd";
 
 import { useI18n } from "@/lib/i18n";
 
@@ -66,29 +65,34 @@ export function HelpPage() {
 
         <section className="rounded-md border border-border bg-bg-subtle p-4">
           <h2 className="text-sm font-semibold">{t.help.faqTitle}</h2>
-          <Collapse
-            size="small"
-            className="mt-3 bg-bg-base"
-            items={t.help.faq.map((item) => ({
-              key: item.q,
-              label: <span className="text-sm font-medium">{item.q}</span>,
-              children: <p className="text-sm leading-6 text-fg-muted">{item.a}</p>,
-            }))}
-          />
+          <div className="mt-3 divide-y divide-border rounded-md border border-border bg-bg-base">
+            {t.help.faq.map((item) => (
+              <details key={item.q} className="px-3 py-2">
+                <summary className="cursor-pointer text-sm font-medium">
+                  {item.q}
+                </summary>
+                <p className="mt-2 text-sm leading-6 text-fg-muted">
+                  {item.a}
+                </p>
+              </details>
+            ))}
+          </div>
         </section>
 
         <section className="rounded-md border border-border bg-bg-subtle p-4">
           <h2 className="text-sm font-semibold">{t.help.referenceTitle}</h2>
           <p className="mt-1 text-xs text-fg-subtle">{t.help.referenceSubtitle}</p>
-          <Collapse
-            size="small"
-            className="mt-4 bg-bg-base"
-            defaultActiveKey={[groups[0]?.title]}
-            items={groups.map((group) => ({
-              key: group.title,
-              label: <span className="text-sm font-medium">{group.title}</span>,
-              children: (
-                <div>
+          <div className="mt-4 space-y-3">
+            {groups.map((group, index) => (
+              <details
+                key={group.title}
+                open={index === 0}
+                className="rounded-md border border-border bg-bg-base"
+              >
+                <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+                  {group.title}
+                </summary>
+                <div className="border-t border-border px-3 py-3">
                   <p className="mb-3 text-xs text-fg-subtle">{group.description}</p>
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[34rem] border-collapse text-left text-xs">
@@ -126,9 +130,9 @@ export function HelpPage() {
                     </table>
                   </div>
                 </div>
-              ),
-            }))}
-          />
+              </details>
+            ))}
+          </div>
         </section>
       </div>
     </div>

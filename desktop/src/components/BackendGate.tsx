@@ -18,7 +18,6 @@
  *  `backend_status` command, we stop spinning and render an explicit
  *  error screen with the log path plus Retry / Quit actions. */
 import { useEffect, useRef, useState } from "react";
-import { Button } from "antd";
 
 import {
   clearBaseUrlOverride,
@@ -155,8 +154,8 @@ export function BackendGate({ children }: Props) {
             </p>
           </div>
           <div className="mt-4 flex justify-center gap-2">
-            <Button
-              type="primary"
+            <button
+              type="button"
               onClick={() => {
                 setFatal(null);
                 setWaitedMs(0);
@@ -177,10 +176,12 @@ export function BackendGate({ children }: Props) {
                   setRetryNonce((n) => n + 1);
                 })();
               }}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
             >
               {t.backend.retry}
-            </Button>
-            <Button
+            </button>
+            <button
+              type="button"
               onClick={() => {
                 void (async () => {
                   try {
@@ -191,9 +192,10 @@ export function BackendGate({ children }: Props) {
                   }
                 })();
               }}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted"
             >
               {t.backend.quit}
-            </Button>
+            </button>
           </div>
         </div>
       </div>
@@ -228,8 +230,8 @@ export function BackendGate({ children }: Props) {
                 <p className="font-medium text-warning">{t.backend.customBaseTitle}</p>
                 <p className="mt-1 break-all font-mono text-[10px]">{baseUrlOverride}</p>
                 <p className="mt-2">{t.backend.customBaseBody}</p>
-                <Button
-                  type="primary"
+                <button
+                  type="button"
                   onClick={() => {
                     clearBaseUrlOverride();
                     setWaitedMs(0);
@@ -238,10 +240,10 @@ export function BackendGate({ children }: Props) {
                     loggedStale.current = false;
                     setRetryNonce((n) => n + 1);
                   }}
-                  className="mt-3"
+                  className="mt-3 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
                 >
                   {t.backend.useBundled}
-                </Button>
+                </button>
               </div>
             )}
           </div>

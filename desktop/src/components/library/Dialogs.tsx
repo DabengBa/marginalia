@@ -8,10 +8,7 @@
  *                       target via /v1/folders before uploading each file.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Filter, Upload as UploadIcon, Download, FolderPlus } from "lucide-react";
-import {
-  Button, Checkbox, Input, Modal, Popover, Segmented, Upload, type InputRef,
-} from "antd";
+import { Filter, X, Upload, Download, FolderPlus, Loader2 } from "lucide-react";
 
 import { folders as foldersApi, uploads, ApiError, settings as settingsApi, webdavSync } from "@/api/client";
 import type { OnConflict, WebDavPlanItem, WebDavPlanResult, WebDavSyncLast } from "@/types/api";
@@ -28,7 +25,7 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const inputRef = useRef<InputRef>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
 
   const submit = async () => {
@@ -51,27 +48,29 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
       title={<><FolderPlus size={14} /> {t.library.newFolderIn(parentName)}</>}
       onClose={onClose}
     >
-      <Input
+      <input
         ref={inputRef}
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onPressEnter={() => void submit()}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
         placeholder={t.dialogs.folderName}
-        className="w-full text-sm"
+        className="w-full rounded-md border border-border bg-bg-base px-3 py-2 text-sm outline-none focus:border-accent"
       />
       {err && <p className="mt-2 text-xs text-danger">{err}</p>}
       <div className="mt-4 flex justify-end gap-2">
-        <Button onClick={onClose}>
+        <button onClick={onClose}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted">
           {t.common.cancel}
-        </Button>
-        <Button
-          type="primary"
-          onClick={submit}
-          disabled={busy || !name.trim()}
-          loading={busy}
-        >
+        </button>
+        <button onClick={submit} disabled={busy || !name.trim()}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-sm font-medium",
+                  busy || !name.trim()
+                    ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
+                    : "bg-accent text-accent-fg hover:opacity-90",
+                )}>
           {busy ? t.common.creating : t.common.create}
-        </Button>
+        </button>
       </div>
     </ModalShell>
   );
@@ -144,6 +143,7 @@ export function UploadDialog({
   const [scanning, setScanning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   // Seed conflict policy from the server's current default so what the
   // dialog opens with matches what Settings → Default conflict policy
@@ -298,49 +298,43 @@ export function UploadDialog({
 
   return (
     <ModalShell
-      title={<><UploadIcon size={14} /> {t.library.uploadTo(folderName)}</>}
+      title={<><Upload size={14} /> {t.library.uploadTo(folderName)}</>}
       onClose={onClose}
       wide
     >
-      <Upload
-        multiple
-        showUploadList={false}
-        disabled={running || scanning}
-        beforeUpload={(file, fileList) => {
-          if (file === fileList[0]) onPickFiles(fileList);
-          return Upload.LIST_IGNORE;
-        }}
-        className="block"
-        styles={{ trigger: { display: "block", width: "100%" } }}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        onClick={() => fileInput.current?.click()}
+        className={cn(
+          "flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed py-8 text-sm",
+          dragOver
+            ? "border-accent bg-accent-subtle text-accent"
+            : "border-border bg-bg-base text-fg-muted hover:border-accent",
+        )}
       >
-        <div
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
-          className={cn(
-            "flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed py-8 text-sm",
-            dragOver
-              ? "border-accent bg-accent-subtle text-accent"
-              : "border-border bg-bg-base text-fg-muted hover:border-accent",
-          )}
-        >
-          <UploadIcon size={20} className="mb-2" />
-          <p>{scanning ? t.dialogs.scanningFolder : t.dialogs.uploadDrop}</p>
-        </div>
-      </Upload>
+        <Upload size={20} className="mb-2" />
+        <p>{scanning ? t.dialogs.scanningFolder : t.dialogs.uploadDrop}</p>
+        <input ref={fileInput} type="file" multiple className="hidden"
+               onChange={(e) => e.target.files && onPickFiles(e.target.files)} />
+      </div>
 
       <div className="mt-3 flex items-center gap-2 text-xs">
         <span className="text-fg-muted">{t.dialogs.onConflict}</span>
-        <Segmented<OnConflict>
-          size="small"
-          value={conflict}
-          disabled={running}
-          onChange={setConflict}
-          options={(["rename", "skip", "error"] as OnConflict[]).map((value) => ({
-            value,
-            label: t.dialogs.conflict[value],
-          }))}
-        />
+        {(["rename", "skip", "error"] as OnConflict[]).map((p) => (
+          <button key={p}
+                  onClick={() => setConflict(p)}
+                  disabled={running}
+                  className={cn(
+                    "rounded-md border px-2 py-0.5",
+                    conflict === p
+                      ? "border-accent bg-accent-subtle text-accent"
+                      : "border-border text-fg-muted hover:bg-bg-muted",
+                  )}>
+            {t.dialogs.conflict[p]}
+          </button>
+        ))}
       </div>
       <p className="mt-3 text-xs leading-5 text-fg-muted">
         {t.dialogs.uploadAnalysisHint}
@@ -349,14 +343,16 @@ export function UploadDialog({
       {items.length > 0 && (
         <div className="mt-3 rounded-md border border-border bg-bg-subtle text-xs">
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-            <Checkbox
-              checked={items.length > 0 && items.every((item) => item.selected)}
-              disabled={running}
-              onChange={toggleAll}
-              className="flex items-center gap-1.5 text-fg-base"
-            >
-              {t.dialogs.uploadFilterTitle}
-            </Checkbox>
+            <label className="flex cursor-pointer items-center gap-1.5 text-fg-base">
+              <input
+                type="checkbox"
+                checked={items.length > 0 && items.every((item) => item.selected)}
+                disabled={running}
+                onChange={toggleAll}
+                className="accent-accent"
+              />
+              <span>{t.dialogs.uploadFilterTitle}</span>
+            </label>
             <span className="text-fg-muted">
               {t.dialogs.uploadPlan(uploadPlan.selectedFiles, uploadPlan.skippedFiles)}
               {" / "}
@@ -371,13 +367,20 @@ export function UploadDialog({
                   onToggle={toggleCategory}
                 />
               ))}
-              <Popover
-                open={filterOpen}
-                onOpenChange={setFilterOpen}
-                trigger="click"
-                placement="bottomRight"
-                arrow={false}
-                content={(
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setFilterOpen((open) => !open)}
+                  disabled={running}
+                  title={t.dialogs.uploadFilterTitle}
+                  className={cn(
+                    "rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base",
+                    filterOpen && "bg-bg-muted text-fg-base",
+                  )}
+                >
+                  <Filter size={14} />
+                </button>
+                {filterOpen && (
                   <UploadFilterPanel
                     groups={uploadPlan.groups}
                     disabled={running}
@@ -385,21 +388,7 @@ export function UploadDialog({
                     onToggleExtension={toggleExtension}
                   />
                 )}
-                styles={{ container: { padding: 0 } }}
-              >
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<Filter size={14} />}
-                  disabled={running}
-                  title={t.dialogs.uploadFilterTitle}
-                  className={cn(
-                    "p-1 text-fg-muted",
-                    filterOpen && "bg-bg-muted text-fg-base",
-                  )}
-                  style={{ width: 24, height: 24, minWidth: 24 }}
-                />
-              </Popover>
+              </div>
             </div>
           </div>
           {uploadPlan.skippedFiles > 0 && (
@@ -444,17 +433,23 @@ export function UploadDialog({
       )}
 
       <div className="mt-4 flex justify-end gap-2">
-        <Button onClick={onClose}>
+        <button onClick={onClose}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted">
           {t.common.close}
-        </Button>
-        <Button
-          type="primary"
+        </button>
+        <button
           onClick={start}
           disabled={running || !hasQueuedSelected}
-          loading={running}
+          className={cn(
+            "flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium",
+            running || !hasQueuedSelected
+              ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
+              : "bg-accent text-accent-fg hover:opacity-90",
+          )}
         >
+          {running && <Loader2 size={12} className="animate-spin" />}
           {running ? t.dialogs.uploading : t.dialogs.start}
-        </Button>
+        </button>
       </div>
     </ModalShell>
   );
@@ -479,7 +474,7 @@ export function WebDavSyncDialog({
   const title = mode === "upload"
     ? t.library.webdavUploadSyncTitle
     : t.library.webdavDownloadSyncTitle;
-  const TitleIcon = mode === "upload" ? UploadIcon : Download;
+  const TitleIcon = mode === "upload" ? Upload : Download;
 
   const refreshPlan = async () => {
     setLoading(true);
@@ -579,14 +574,16 @@ export function WebDavSyncDialog({
       {!loading && plan && (
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-            <Checkbox
-              checked={allSelected}
-              disabled={running || plan.items.length === 0}
-              onChange={toggleAll}
-              className="flex items-center gap-1.5 text-fg-base"
-            >
-              {t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}
-            </Checkbox>
+            <label className="flex cursor-pointer items-center gap-1.5 text-fg-base">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                disabled={running || plan.items.length === 0}
+                onChange={toggleAll}
+                className="accent-accent"
+              />
+              <span>{t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}</span>
+            </label>
           </div>
           {running && (
             <div className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-2 text-xs text-fg-muted">
@@ -624,20 +621,26 @@ export function WebDavSyncDialog({
             )}
           </div>
           <div className="mt-4 flex justify-end gap-2">
-            <Button
+            <button
               onClick={onClose}
               disabled={running}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
             >
               {t.common.close}
-            </Button>
-            <Button
-              type="primary"
+            </button>
+            <button
               onClick={run}
               disabled={running || selected.size === 0}
-              loading={running}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium",
+                running || selected.size === 0
+                  ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
+                  : "bg-accent text-accent-fg hover:opacity-90",
+              )}
             >
+              {running && <Loader2 size={12} className="animate-spin" />}
               {mode === "upload" ? t.library.webdavUploadSelected : t.library.webdavDownloadSelected}
-            </Button>
+            </button>
           </div>
         </>
       )}
@@ -709,10 +712,12 @@ function WebDavPlanRow({
   return (
     <tr className="border-b border-border last:border-0">
       <td className="px-3 py-1.5">
-        <Checkbox
+        <input
+          type="checkbox"
           checked={selected}
           disabled={disabled}
           onChange={() => onToggle(item.entry_id)}
+          className="accent-accent"
         />
       </td>
       <td className="min-w-0 px-1 py-1.5">
@@ -742,18 +747,22 @@ function CategoryToggle({
   const { t } = useI18n();
   const checked = group.selectedFiles > 0;
   return (
-    <Checkbox
-      checked={checked}
-      disabled={disabled}
-      onChange={() => onToggle(group.category)}
+    <label
       className={cn(
-        "whitespace-nowrap text-fg-muted",
+        "flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-fg-muted",
         checked && "text-fg-base",
       )}
       title={t.dialogs.uploadCategorySummary(group.files, formatBytes(group.bytes))}
     >
-      {t.dialogs.uploadCategories[group.category]}
-    </Checkbox>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={() => onToggle(group.category)}
+        className="accent-accent"
+      />
+      <span>{t.dialogs.uploadCategories[group.category]}</span>
+    </label>
   );
 }
 
@@ -772,8 +781,8 @@ function UploadFilterPanel({
   return (
     <div
       className={cn(
-        "w-[360px] max-w-[calc(100vw-48px)]",
-        "rounded-md bg-bg-elevated p-3",
+        "absolute right-0 top-full z-50 mt-2 w-[360px] max-w-[calc(100vw-48px)]",
+        "rounded-md border border-border bg-bg-elevated p-3 shadow-xl",
       )}
     >
       <div className="space-y-3">
@@ -783,25 +792,24 @@ function UploadFilterPanel({
               <span className="font-medium text-fg-base">
                 {t.dialogs.uploadCategories[group.category]}
               </span>
-              <Button
-                size="small"
+              <button
+                type="button"
                 disabled={disabled}
                 onClick={() => onToggleCategory(group.category)}
-                className="h-6 px-2 text-[11px] text-fg-muted"
+                className="rounded border border-border px-2 py-0.5 text-[11px] text-fg-muted hover:border-accent hover:text-accent disabled:opacity-50"
               >
                 {group.selectedFiles === group.files
                   ? t.dialogs.uploadSelectNone
                   : t.dialogs.uploadSelectAll}
-              </Button>
+              </button>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {group.extensions.map((ext) => {
                 const selected = ext.selectedFiles > 0;
                 return (
-                  <Button
+                  <button
                     key={ext.ext}
-                    type={selected ? "primary" : "default"}
-                    size="small"
+                    type="button"
                     disabled={disabled}
                     onClick={() => onToggleExtension(group.category, ext.ext)}
                     title={
@@ -809,10 +817,15 @@ function UploadFilterPanel({
                         ? t.dialogs.uploadExcludeExtension(ext.ext)
                         : t.dialogs.uploadIncludeExtension(ext.ext)
                     }
-                    className="h-6 px-2 text-[11px]"
+                    className={cn(
+                      "rounded border px-2 py-1 text-[11px] disabled:opacity-50",
+                      selected
+                        ? "border-accent/70 bg-accent-subtle text-accent"
+                        : "border-border bg-bg-muted text-fg-subtle",
+                    )}
                   >
                     {ext.ext} {ext.files}
-                  </Button>
+                  </button>
                 );
               })}
             </div>
@@ -843,10 +856,12 @@ function UploadRow({
   return (
     <tr className={cn("border-b border-border last:border-0", skipped && "text-fg-subtle")}>
       <td className="px-3 py-1.5">
-        <Checkbox
+        <input
+          type="checkbox"
           checked={item.selected}
           disabled={running || item.status !== "queued"}
           onChange={() => onToggle(index)}
+          className="accent-accent"
         />
       </td>
       <td className="min-w-0 px-1 py-1.5">
@@ -1036,19 +1051,30 @@ function ModalShell({ title, onClose, children, wide }: {
   children: React.ReactNode;
   wide?: boolean;
 }) {
+  const { t } = useI18n();
   return (
-    <Modal
-      open
-      centered
-      destroyOnHidden
-      footer={null}
-      title={<span className="flex items-center gap-2">{title}</span>}
-      width={wide ? 900 : 360}
-      onCancel={onClose}
-      styles={{ body: { maxHeight: "calc(100vh - 140px)", overflowY: "auto" } }}
-    >
-      {children}
-    </Modal>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
+         onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={cn(
+          "flex max-h-[calc(100vh-32px)] flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated shadow-2xl",
+          wide
+            ? "w-[900px] max-w-[calc(100vw-32px)]"
+            : "w-[360px] max-w-[calc(100vw-32px)]",
+        )}
+      >
+        <header className="flex items-center justify-between border-b border-border px-4 py-2.5 text-sm font-medium">
+          <span className="flex items-center gap-2">{title}</span>
+          <button onClick={onClose}
+                  title={t.common.close}
+                  className="rounded-md p-1 text-fg-muted hover:bg-bg-muted">
+            <X size={14} />
+          </button>
+        </header>
+        <div className="overflow-y-auto p-4">{children}</div>
+      </div>
+    </div>
   );
 }
 

@@ -88,9 +88,9 @@ export function ActivityPopover({ open, pollMs }: Props) {
   return (
     <div
       className={cn(
-        "max-h-[60vh]",
+        "absolute bottom-7 right-3 z-50 max-h-[60vh]",
         "w-[500px] max-w-[calc(100vw-24px)]",
-        "overflow-hidden rounded-md bg-bg-elevated",
+        "overflow-hidden rounded-md border border-border bg-bg-elevated shadow-lg",
         "flex flex-col text-xs",
       )}
     >

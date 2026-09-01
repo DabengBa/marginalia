@@ -20,7 +20,6 @@ import { useAuthObjectUrl } from "@/components/library/viewers/ViewerShared";
 import type { ChatImage } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
-import { Button, Image } from "antd";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
 
@@ -91,6 +90,7 @@ const _IMAGE_MARKER_RE = /\s*\[(?:image|\d+\s+images?)\s+attached\]\s*$/i;
 
 export function TurnView({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const navigate = useNavigate();
   const { t } = useI18n();
 
@@ -150,32 +150,42 @@ export function TurnView({ turn }: { turn: Turn }) {
           {turn.images?.map((img, i) => {
             const src = `data:${img.media_type};base64,${img.data_b64}`;
             return (
-              <Image
+              <img
                 key={`live-${i}`}
                 src={src}
                 alt={t.chat.imageAlt(i + 1)}
-                width={64}
-                height={64}
-                preview={{ mask: false }}
+                onClick={() => setLightbox(src)}
                 className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
               />
             );
           })}
           {turn.attachmentUrls?.map((url, i) => (
             <ReplayedAttachment
-              key={`replay-${i}`} url={url} index={i}
+              key={`replay-${i}`} url={url} index={i} onOpen={setLightbox}
             />
           ))}
         </div>
       )}
 
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 cursor-zoom-out animate-fade-in"
+        >
+          <img
+            src={lightbox}
+            alt={t.chat.imageAlt(1)}
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+          />
+        </div>
+      )}
+
       {showSteps && (
         <div className="ml-8 mb-2">
-          <Button
-            type="text"
-            size="small"
+          <button
             onClick={() => setOpen((o) => !o)}
-            className="flex items-center gap-1.5 px-0 text-xs text-fg-muted hover:text-fg-base"
+            className="group flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg-base"
           >
             <ChevronDown
               size={12}
@@ -186,7 +196,7 @@ export function TurnView({ turn }: { turn: Turn }) {
               {inFlight && ` · ${t.chat.inProgress}`}
             </span>
             {inFlight && <Loader2 size={11} className="animate-spin" />}
-          </Button>
+          </button>
           {open && (
             <ul className="mt-2 space-y-1.5 border-l border-border pl-3 text-xs">
               {turn.steps.map((s, i) => (
@@ -232,18 +242,17 @@ export function TurnView({ turn }: { turn: Turn }) {
  *  box so the loading/error states don't shift layout, matching the live
  *  pasted-image thumbnails. */
 function ReplayedAttachment(
-  { url, index }: { url: string; index: number },
+  { url, index, onOpen }:
+  { url: string; index: number; onOpen: (src: string) => void },
 ) {
   const { t } = useI18n();
   const { src, err } = useAuthObjectUrl(url);
   if (src) {
     return (
-      <Image
+      <img
         src={src}
         alt={t.chat.imageAlt(index + 1)}
-        width={64}
-        height={64}
-        preview={{ mask: false }}
+        onClick={() => onOpen(src)}
         className="h-16 w-16 cursor-zoom-in rounded-md border border-border object-cover"
       />
     );
@@ -285,18 +294,16 @@ function StepRow({ step }: { step: Step }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           {expandable ? (
-            <Button
-              type="text"
-              size="small"
+            <button
               onClick={() => setOpen((o) => !o)}
               className={cn(
-                "h-auto min-w-0 truncate p-0 text-left",
+                "truncate text-left hover:text-fg-base",
                 step.result === "failed" && "text-danger",
               )}
               title={expandTitle}
             >
               {step.label}
-            </Button>
+            </button>
           ) : (
             <span className={cn(
               "truncate",

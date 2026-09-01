@@ -2,7 +2,6 @@ import { useState } from "react";
 import { AlertCircle, CheckCircle2, ExternalLink, RefreshCw } from "lucide-react";
 
 import { APP_VERSION } from "@/lib/appVersion";
-import { Button } from "antd";
 import { useI18n } from "@/lib/i18n";
 import { interceptExternalLink } from "@/lib/openExternal";
 import { cn } from "@/lib/utils";
@@ -65,16 +64,22 @@ export function AboutPage() {
               <h2 className="text-sm font-semibold">{t.about.versionTitle}</h2>
               <p className="mt-1 font-mono text-lg">v{APP_VERSION}</p>
             </div>
-            <Button
-              type="primary"
-              loading={state.status === "checking"}
-              icon={<RefreshCw size={14} />}
+            <button
+              type="button"
+              disabled={state.status === "checking"}
               onClick={() => void checkLatest()}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg",
+                "hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60",
+              )}
             >
+              <RefreshCw
+                className={cn("h-4 w-4", state.status === "checking" && "animate-spin")}
+              />
               {state.status === "checking"
                 ? t.about.checkingLatest
                 : t.about.checkLatest}
-            </Button>
+            </button>
           </div>
 
           <LatestVersionResult state={state} />
@@ -150,19 +155,16 @@ function LatestVersionResult({ state }: { state: CheckState }) {
         {published && (
           <p className="mt-0.5 text-fg-muted">{t.about.publishedAt(published)}</p>
         )}
-        <Button
-          type="link"
-          size="small"
+        <a
           href={state.release.html_url || RELEASES_URL}
           target="_blank"
           rel="noreferrer"
           onClick={(e) => interceptExternalLink(e, state.release.html_url || RELEASES_URL)}
-          icon={<ExternalLink className="h-3 w-3" />}
-          iconPlacement="end"
-          className="mt-1 h-auto px-0 text-xs"
+          className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
         >
           {t.about.openLatestRelease}
-        </Button>
+          <ExternalLink className="h-3 w-3" />
+        </a>
       </div>
     </div>
   );
@@ -176,18 +178,16 @@ function ExternalLinkButton({
   children: React.ReactNode;
 }) {
   return (
-    <Button
-      block
+    <a
       href={href}
       target="_blank"
       rel="noreferrer"
       onClick={(e) => interceptExternalLink(e, href)}
-      icon={<ExternalLink className="h-3.5 w-3.5 shrink-0" />}
-      iconPlacement="end"
-      className="h-auto justify-between px-3 py-2 text-sm text-fg-muted"
+      className="inline-flex items-center justify-between gap-2 rounded-md border border-border bg-bg-base px-3 py-2 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg-base"
     >
-      {children}
-    </Button>
+      <span>{children}</span>
+      <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+    </a>
   );
 }
 
