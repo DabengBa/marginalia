@@ -355,19 +355,16 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           <CapabilitySelect
             label={t.llm.supportsVision}
             value={form.supports_vision ?? ""}
-            inherited={view.capabilities.supports_vision}
             onChange={(value) => setForm({ ...form, supports_vision: value })}
           />
           <CapabilitySelect
             label={t.llm.supportsTools}
             value={form.supports_tools ?? ""}
-            inherited={view.capabilities.supports_tools}
             onChange={(value) => setForm({ ...form, supports_tools: value })}
           />
           <CapabilitySelect
             label={t.llm.supportsTemperature}
             value={form.supports_temperature ?? ""}
-            inherited={view.capabilities.supports_temperature}
             onChange={(value) => setForm({ ...form, supports_temperature: value })}
           />
           <Field label={t.llm.apiKey}>
@@ -441,12 +438,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function CapabilitySelect({
   label,
   value,
-  inherited,
   onChange,
 }: {
   label: string;
   value: string;
-  inherited: boolean;
   onChange: (value: string) => void;
 }) {
   return (
@@ -456,7 +451,7 @@ function CapabilitySelect({
         onChange={(event) => onChange(event.target.value)}
         className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
       >
-        <option value="">{String(inherited)}</option>
+        <option value="">auto</option>
         <option value="true">true</option>
         <option value="false">false</option>
       </select>
